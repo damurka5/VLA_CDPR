@@ -1,6 +1,18 @@
 # VLA_CDPR
 VLA models application in CDPR
 
+## **Problem**
+
+- Standard VLA (Video-Language-Action) models lack physical understanding of concepts like mass, gravity, and inertia.
+- This limits generalization to new object interactions or environments in real-world robotic applications.
+
+## **Our Expected Contribution**
+
+- Develop a modular VLA model that integrates differentiable physics to simulate and predict real-world object dynamics.
+- Learn physical parameters (e.g., mass, velocity, gravity effects) from raw video and language inputs via an interpretable latent space.
+- Enable the robot to reason about physical laws and plan robust manipulation strategies in changing conditions.
+- Ground visual and language concepts (e.g., "heavy", "fall", "support") to latent physical parameters for enhanced action selection.
+
 ## Problem Statement
 
 The project aims to deploy a cable-driven parallel robot (CDPR) to maintain the equilibrium of various objects on a moving platform. The challenge is to control the CDPR effectively to stabilize these objects despite platform motion, comparing the efficiency of different control and modeling approaches including VLA models, other machine learning models, and nonlinear optimization techniques for actuator control.
