@@ -10,7 +10,7 @@ import numpy as np
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Replace with your actual checkpoint path
-CHECKPOINT_PATH = "/repo/smolvla_base"
+CHECKPOINT_PATH = "/root/repo/smolvla_base"
 
 # --- Image Loading ---
 def get_from_camera():
