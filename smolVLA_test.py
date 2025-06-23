@@ -2,7 +2,8 @@ import torch
 import time
 from PIL import Image
 from lerobot.common.policies.smolvla.modeling_smolvla import SmolVLAPolicy
-from lerobot.common.policies.normalize import Normalize
+from lerobot.common.policies.normalize import Normalize, NormalizationMode
+from lerobot.common.policies.types import PolicyFeature
 from transformers import AutoProcessor
 
 # Configuration
@@ -16,19 +17,19 @@ policy.eval()
 
 # Initialize normalization if it's missing
 # if not hasattr(policy, 'normalize_inputs'):
-# Get state_dim from the model config or observation
+    # Get state_dim from the model config or observation
 state_dim = policy.config.state_dim if hasattr(policy.config, 'state_dim') else 10  # default fallback
 
-# Create features dictionary
+# Create proper PolicyFeature objects
 features = {
-    'observation.images.top': {'shape': [3, 512, 512]},
-    'observation.state': {'shape': [state_dim]}
+    'observation.images.top': PolicyFeature(shape=[3, 512, 512], type="image"),
+    'observation.state': PolicyFeature(shape=[state_dim], type="state")
 }
 
 # Create normalization mapping
 norm_map = {
-    'observation.images.top': "mean_std",
-    'observation.state': "mean_std"
+    'observation.images.top': NormalizationMode.MEAN_STD,
+    'observation.state': NormalizationMode.MEAN_STD
 }
 
 # Create stats dictionary
