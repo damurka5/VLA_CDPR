@@ -2,10 +2,8 @@ import torch
 import time
 from PIL import Image
 from lerobot.common.policies.smolvla.modeling_smolvla import SmolVLAPolicy
-from lerobot.common.policies.smolvla.configuration_smolvla import SmolVLAConfig
-from lerobot.common.policies.normalize import NormalizeInputs
+from lerobot.common.policies.normalize import Normalize
 from transformers import AutoProcessor
-import numpy as np
 
 # Configuration
 CHECKPOINT_PATH = "/root/repo/smolvla_base"
@@ -16,21 +14,36 @@ PROMPT = "put eggplant into pot"
 policy = SmolVLAPolicy.from_pretrained(CHECKPOINT_PATH).to("cuda")
 policy.eval()
 
-# Initialize normalization stats if they're missing
+# Initialize normalization if it's missing
 if not hasattr(policy, 'normalize_inputs'):
-    # Create dummy stats (replace with real stats from your training if available)
-    state_dim = policy.config.state_dim
+    # Get state_dim from the model config or observation
+    state_dim = policy.config.state_dim if hasattr(policy.config, 'state_dim') else 10  # default fallback
+    
+    # Create features dictionary
+    features = {
+        'observation.images.top': {'shape': [3, 512, 512]},
+        'observation.state': {'shape': [state_dim]}
+    }
+    
+    # Create normalization mapping
+    norm_map = {
+        'observation.images.top': "mean_std",
+        'observation.state': "mean_std"
+    }
+    
+    # Create stats dictionary
     stats = {
         'observation.images.top': {
-            'mean': torch.zeros(3, 512, 512),
-            'std': torch.ones(3, 512, 512)
+            'mean': torch.zeros(3, 1, 1),  # Using 1x1 for height/width to be invariant
+            'std': torch.ones(3, 1, 1)
         },
         'observation.state': {
             'mean': torch.zeros(state_dim),
             'std': torch.ones(state_dim)
         }
     }
-    policy.normalize_inputs = NormalizeInputs(stats)
+    
+    policy.normalize_inputs = Normalize(features, norm_map, stats).to("cuda")
 
 # patch: The loaded policy is missing the language_tokenizer attribute.
 policy.language_tokenizer = AutoProcessor.from_pretrained(policy.config.vlm_model_name).tokenizer
@@ -40,7 +53,7 @@ image = Image.open(IMAGE_PATH).convert("RGB")
 
 # Create batch
 dummy_batch = {
-    "observation.images.top": torch.rand(1, 3, 512, 512, device="cuda"),  # placeholder, will be replaced
+    "observation.images.top": torch.rand(1, 3, 512, 512, device="cuda"),  # placeholder
     "observation.state": torch.rand(1, state_dim, device="cuda"),
     "task": [PROMPT],
 }
