@@ -24,18 +24,27 @@ policy.language_tokenizer = AutoProcessor.from_pretrained(policy.config.vlm_mode
 
 state_dim = policy.model.config.max_state_dim
 
-# Create valid normalization stats
+# Define features and norm_map as expected by Normalize
+features = ["observation.images.top", "observation.state"]
+norm_map = {
+    "observation.images.top": ["mean", "std"],
+    "observation.state": ["mean", "std"],
+}
+
+# Create normalization stats with correct shapes and device
 norm_stats = {
     "observation.images.top": {
-        "mean": torch.tensor([0.0, 0.0, 0.0]).cuda(),
-        "std": torch.tensor([1.0, 1.0, 1.0]).cuda(),
+        "mean": torch.zeros(3).cuda(),
+        "std": torch.ones(3).cuda(),
     },
     "observation.state": {
         "mean": torch.zeros(state_dim).cuda(),
         "std": torch.ones(state_dim).cuda(),
     }
 }
-policy.normalize_inputs = Normalize(stats=norm_stats)
+
+# Initialize Normalize with all required arguments
+policy.normalize_inputs = Normalize(stats=norm_stats, features=features, norm_map=norm_map)
 
 # --- Prepare REAL inputs ---
 def load_image():
