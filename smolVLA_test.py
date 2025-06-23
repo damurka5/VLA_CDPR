@@ -15,35 +15,35 @@ policy = SmolVLAPolicy.from_pretrained(CHECKPOINT_PATH).to("cuda")
 policy.eval()
 
 # Initialize normalization if it's missing
-if not hasattr(policy, 'normalize_inputs'):
-    # Get state_dim from the model config or observation
-    state_dim = policy.config.state_dim if hasattr(policy.config, 'state_dim') else 10  # default fallback
-    
-    # Create features dictionary
-    features = {
-        'observation.images.top': {'shape': [3, 512, 512]},
-        'observation.state': {'shape': [state_dim]}
+# if not hasattr(policy, 'normalize_inputs'):
+# Get state_dim from the model config or observation
+state_dim = policy.config.state_dim if hasattr(policy.config, 'state_dim') else 10  # default fallback
+
+# Create features dictionary
+features = {
+    'observation.images.top': {'shape': [3, 512, 512]},
+    'observation.state': {'shape': [state_dim]}
+}
+
+# Create normalization mapping
+norm_map = {
+    'observation.images.top': "mean_std",
+    'observation.state': "mean_std"
+}
+
+# Create stats dictionary
+stats = {
+    'observation.images.top': {
+        'mean': torch.zeros(3, 1, 1),  # Using 1x1 for height/width to be invariant
+        'std': torch.ones(3, 1, 1)
+    },
+    'observation.state': {
+        'mean': torch.zeros(state_dim),
+        'std': torch.ones(state_dim)
     }
-    
-    # Create normalization mapping
-    norm_map = {
-        'observation.images.top': "mean_std",
-        'observation.state': "mean_std"
-    }
-    
-    # Create stats dictionary
-    stats = {
-        'observation.images.top': {
-            'mean': torch.zeros(3, 1, 1),  # Using 1x1 for height/width to be invariant
-            'std': torch.ones(3, 1, 1)
-        },
-        'observation.state': {
-            'mean': torch.zeros(state_dim),
-            'std': torch.ones(state_dim)
-        }
-    }
-    
-    policy.normalize_inputs = Normalize(features, norm_map, stats).to("cuda")
+}
+
+policy.normalize_inputs = Normalize(features, norm_map, stats).to("cuda")
 
 # patch: The loaded policy is missing the language_tokenizer attribute.
 policy.language_tokenizer = AutoProcessor.from_pretrained(policy.config.vlm_model_name).tokenizer
