@@ -1,10 +1,16 @@
 import torch
 import time
 from PIL import Image
+from dataclasses import dataclass
 from lerobot.common.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 from lerobot.common.policies.normalize import Normalize, NormalizationMode
-from lerobot.common.policies.types import PolicyFeature
 from transformers import AutoProcessor
+
+# Simple PolicyFeature replacement
+@dataclass
+class PolicyFeature:
+    shape: list
+    type: str
 
 # Configuration
 CHECKPOINT_PATH = "/root/repo/smolvla_base"
