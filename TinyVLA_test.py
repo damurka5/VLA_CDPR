@@ -15,7 +15,7 @@ policy_config = {
 }
 
 # Device setup
-device = 'mps'#torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 from transformers import AutoConfig, AutoModelForCausalLM

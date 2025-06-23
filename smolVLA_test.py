@@ -7,7 +7,7 @@ from transformers import AutoProcessor
 from PIL import Image
 import numpy as np
 
-device = torch.device("cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Replace with your actual checkpoint path
 CHECKPOINT_PATH = "/Users/damirnurtdinov/Desktop/My Courses/Диплом/vla/smolvla_base"

@@ -4,7 +4,7 @@ import time
 import torch
 
 # Check if MPS (Apple Metal) is available
-device = torch.device("cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 def get_from_camera():
