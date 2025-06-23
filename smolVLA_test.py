@@ -23,22 +23,18 @@ policy.eval()
 
 # Initialize normalization if it's missing
 # if not hasattr(policy, 'normalize_inputs'):
-    # Get state_dim from the model config or observation
 state_dim = policy.config.state_dim if hasattr(policy.config, 'state_dim') else 10
 
-# Create proper PolicyFeature objects based on model's expected features
 features = {
     'observation.image': PolicyFeature(shape=[3, 256, 256], type="image"),
     'observation.state': PolicyFeature(shape=[state_dim], type="state")
 }
 
-# Create normalization mapping
 norm_map = {
     'observation.image': NormalizationMode.MEAN_STD,
     'observation.state': NormalizationMode.MEAN_STD
 }
 
-# Create stats dictionary
 stats = {
     'observation.image': {
         'mean': torch.zeros(3, 1, 1),
@@ -52,29 +48,30 @@ stats = {
 
 policy.normalize_inputs = Normalize(features, norm_map, stats).to("cuda")
 
-# Set up language tokenizer
-policy.language_tokenizer = AutoProcessor.from_pretrained(policy.config.vlm_model_name).tokenizer
+# Set up processor
+processor = AutoProcessor.from_pretrained(policy.config.vlm_model_name)
+policy.language_tokenizer = processor.tokenizer
 
 # Load and prepare image
 image = Image.open(IMAGE_PATH).convert("RGB")
 
-# Create batch with correct feature names
+# Create batch
 dummy_batch = {
     "observation.image": torch.rand(1, 3, 256, 256, device="cuda"),  # placeholder
     "observation.state": torch.rand(1, state_dim, device="cuda"),
     "task": [PROMPT],
 }
 
-# Preprocess image - resize to expected dimensions
-processor = AutoProcessor.from_pretrained(policy.config.vlm_model_name)
-processed_image = processor(
-    images=image, 
+# Process image without explicit size parameter
+processed = processor(
+    images=image,
     return_tensors="pt",
-    size={"height": 256, "width": 256}  # Ensure correct size
-)["pixel_values"].to("cuda")
+    padding=True
+)
+processed_image = processed["pixel_values"].to("cuda")
 dummy_batch["observation.image"] = processed_image
 
-# Prepare inputs for the model
+# Prepare inputs
 normalized_batch = policy.normalize_inputs(dummy_batch)
 images, img_masks = policy.prepare_images(normalized_batch)
 state = policy.prepare_state(normalized_batch)
