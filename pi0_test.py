@@ -23,11 +23,10 @@ def prepare_inputs(image_path, prompt, device):
     img_tensor = img_tensor.permute(2, 0, 1)  # HWC -> CHW
     img_tensor = img_tensor.unsqueeze(0).to(device)  # Add batch dim
     
-    # Prepare language input
-    lang_tokens = torch.tensor([0]).unsqueeze(0).to(device)  # Dummy - replace with actual tokenizer
-    lang_masks = torch.ones(1, 1, dtype=torch.bool).to(device)
+    # Prepare language input (simplified - replace with actual tokenization if needed)
+    text_input = [prompt]
     
-    return img_tensor, lang_tokens, lang_masks
+    return img_tensor, text_input
 
 def main():
     # Load model
@@ -36,28 +35,29 @@ def main():
     policy.eval()
     
     # Prepare inputs
-    images, lang_tokens, lang_masks = prepare_inputs(IMAGE_PATH, PROMPT, DEVICE)
-    img_masks = torch.ones_like(images[:,0,0,0]).bool().to(DEVICE)
-    state = torch.zeros(1, policy.model.state_dim).to(DEVICE)
+    images, text_input = prepare_inputs(IMAGE_PATH, PROMPT, DEVICE)
     
     # Warmup runs
     print(f"Running {NUM_WARMUP} warmup iterations...")
     with torch.no_grad():
         for _ in range(NUM_WARMUP):
-            _ = policy.model.sample_actions(images, img_masks, lang_tokens, lang_masks, state)
-    torch.cuda.synchronize()
+            _ = policy(images, text_input)
+    if DEVICE == "cuda":
+        torch.cuda.synchronize()
     
     # Benchmark
     print(f"Running {NUM_ITERATIONS} benchmark iterations...")
     timings = []
     for _ in range(NUM_ITERATIONS):
-        torch.cuda.synchronize()
+        if DEVICE == "cuda":
+            torch.cuda.synchronize()
         start_time = time.perf_counter()
         
         with torch.no_grad():
-            _ = policy.model.sample_actions(images, img_masks, lang_tokens, lang_masks, state)
+            _ = policy(images, text_input)
         
-        torch.cuda.synchronize()
+        if DEVICE == "cuda":
+            torch.cuda.synchronize()
         end_time = time.perf_counter()
         timings.append(end_time - start_time)
     
