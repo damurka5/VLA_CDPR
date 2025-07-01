@@ -18,21 +18,16 @@ def prepare_inputs(image_path, prompt, device):
     img = Image.open(image_path).convert("RGB")
     img = img.resize((256, 256))  # PI0 expects 256x256
     
-    # Convert to tensor and normalize (example values - adjust per PI0's preprocessing)
+    # Convert to tensor and normalize
     img_tensor = torch.from_numpy(np.array(img)).float() / 255.0
     img_tensor = img_tensor.permute(2, 0, 1)  # HWC -> CHW
     img_tensor = img_tensor.unsqueeze(0).to(device)  # Add batch dim
     
-    # Prepare proper input dictionary with image features
+    # Prepare input dictionary according to PI0's expected format
     batch = {
-        "observation": {
-            "image_primary": img_tensor,  # Changed from 'image' to 'image_primary'
-            "timestep_pad_mask": torch.ones(1, dtype=torch.bool).to(device)
-        },
-        "task": {
-            "language_instruction": [prompt],
-            "language_instruction_encoded": torch.ones(1, 1, dtype=torch.long).to(device)  # Dummy tokens
-        }
+        "image_primary": img_tensor,  # Direct image input
+        "timestep_pad_mask": torch.ones(1, dtype=torch.bool).to(device),
+        "language_instruction": [prompt]
     }
     
     return batch
@@ -50,7 +45,7 @@ def main():
     print(f"Running {NUM_WARMUP} warmup iterations...")
     with torch.no_grad():
         for _ in range(NUM_WARMUP):
-            _ = policy(batch)
+            _ = policy.forward(batch)  # Explicitly call forward
     if DEVICE == "cuda":
         torch.cuda.synchronize()
     
@@ -63,7 +58,7 @@ def main():
         start_time = time.perf_counter()
         
         with torch.no_grad():
-            _ = policy(batch)
+            _ = policy.forward(batch)  # Explicitly call forward
         
         if DEVICE == "cuda":
             torch.cuda.synchronize()
