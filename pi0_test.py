@@ -4,7 +4,6 @@ import torch
 from lerobot.common.policies.pi0.modeling_pi0 import PI0Policy
 import numpy as np
 from PIL import Image
-import inspect
 
 # Configuration
 IMAGE_PATH = "data/put_eggplant_into_pot--clutter.png"
@@ -14,7 +13,7 @@ NUM_WARMUP = 10
 NUM_ITERATIONS = 100
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-def prepare_inputs(image_path, prompt, device, policy):
+def prepare_inputs(image_path, prompt, device):
     # Load and preprocess image
     img = Image.open(image_path).convert("RGB")
     img = img.resize((256, 256))
@@ -24,28 +23,14 @@ def prepare_inputs(image_path, prompt, device, policy):
     img_tensor = (img_tensor - 0.5) / 0.5  # Standard normalization
     img_tensor = img_tensor.permute(2, 0, 1)  # HWC -> CHW
     img_tensor = img_tensor.unsqueeze(0).to(device)  # Add batch dim
-
-    # Inspect model's prepare_images method to understand expected format
-    prepare_images_src = inspect.getsource(policy.model.prepare_images)
-    print("\nModel's prepare_images method expects:")
-    print(prepare_images_src)
-
-    # Based on common patterns, try this comprehensive input format
+    
+    # Basic input structure that should work with PI0FlowMatching
     batch = {
-        "observation": {
-            "image_primary": img_tensor,
-            "image_wrist": img_tensor,  # Some models expect multiple views
-            "timestep_pad_mask": torch.ones(1, dtype=torch.bool).to(device)
-        },
-        "task": {
-            "language_instruction": [prompt],
-            "language_instruction_encoded": torch.ones(1, 1, dtype=torch.long).to(device)
-        },
-        "image": img_tensor,  # Some models expect direct image key
-        "image_primary": img_tensor,
+        "image": img_tensor,
+        "language_instruction": [prompt],
         "pad_mask": torch.ones(1, dtype=torch.bool).to(device)
     }
-
+    
     return batch
 
 def main():
@@ -54,38 +39,54 @@ def main():
     policy = PI0Policy.from_pretrained(MODEL_NAME).to(DEVICE)
     policy.eval()
     
-    # Prepare inputs with model reference for inspection
-    batch = prepare_inputs(IMAGE_PATH, PROMPT, DEVICE, policy)
+    # Print model architecture for debugging
+    print("\nModel architecture:")
+    print(policy.model)
     
-    # Debug: Print simplified batch structure
-    print("\nPrepared batch structure:")
+    # Prepare inputs
+    batch = prepare_inputs(IMAGE_PATH, PROMPT, DEVICE)
+    
+    # Debug: Print batch structure
+    print("\nInput batch structure:")
     for k, v in batch.items():
-        if isinstance(v, dict):
-            print(f"{k}:")
-            for sk, sv in v.items():
-                print(f"  {sk}: {type(sv)} {sv.shape if hasattr(sv, 'shape') else ''}")
-        else:
-            print(f"{k}: {type(v)} {v.shape if hasattr(v, 'shape') else ''}")
+        print(f"{k}: {v.shape if isinstance(v, torch.Tensor) else v}")
 
-    # Warmup runs with detailed error handling
+    # Warmup runs
     print(f"\nRunning {NUM_WARMUP} warmup iterations...")
     with torch.no_grad():
         for i in range(NUM_WARMUP):
             try:
                 output = policy(batch)
-                print(f"Warmup {i+1} successful!")
-                break  # Exit if successful
+                print(f"Warmup {i+1} successful! Output shape: {output.shape}")
+                break
             except Exception as e:
                 print(f"Warmup {i+1} failed: {str(e)}")
                 if i == NUM_WARMUP - 1:
                     print("\nAll warmup runs failed. Please check:")
-                    print("1. The model's expected input format")
-                    print("2. Image normalization parameters")
-                    print("3. Required keys in the input batch")
+                    print("1. The exact input format expected by PI0FlowMatching")
+                    print("2. Whether the model expects multiple image views")
+                    print("3. If text needs proper tokenization")
                     return
 
-    # Rest of benchmark code...
-    # [Previous benchmark code continues...]
+    # Benchmark
+    print(f"\nRunning {NUM_ITERATIONS} benchmark iterations...")
+    timings = []
+    for i in range(NUM_ITERATIONS):
+        torch.cuda.synchronize() if DEVICE == "cuda" else None
+        start_time = time.perf_counter()
+        
+        with torch.no_grad():
+            _ = policy(batch)
+        
+        torch.cuda.synchronize() if DEVICE == "cuda" else None
+        end_time = time.perf_counter()
+        timings.append(end_time - start_time)
+        
+        if (i+1) % 10 == 0:
+            print(f"Completed {i+1}/{NUM_ITERATIONS} iterations")
+
+    # Stats calculation and output
+    # [Previous stats code continues...]
 
 if __name__ == "__main__":
     main()
