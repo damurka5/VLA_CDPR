@@ -23,10 +23,18 @@ def prepare_inputs(image_path, prompt, device):
     img_tensor = img_tensor.permute(2, 0, 1)  # HWC -> CHW
     img_tensor = img_tensor.unsqueeze(0).to(device)  # Add batch dim
     
-    # Prepare language input (simplified - replace with actual tokenization if needed)
-    text_input = [prompt]
+    # Prepare proper input dictionary
+    batch = {
+        "observation": {
+            "image": img_tensor,
+            "timestep_pad_mask": torch.ones(1, dtype=torch.bool).to(device)
+        },
+        "task": {
+            "language_instruction": [prompt]
+        }
+    }
     
-    return img_tensor, text_input
+    return batch
 
 def main():
     # Load model
@@ -35,13 +43,13 @@ def main():
     policy.eval()
     
     # Prepare inputs
-    images, text_input = prepare_inputs(IMAGE_PATH, PROMPT, DEVICE)
+    batch = prepare_inputs(IMAGE_PATH, PROMPT, DEVICE)
     
     # Warmup runs
     print(f"Running {NUM_WARMUP} warmup iterations...")
     with torch.no_grad():
         for _ in range(NUM_WARMUP):
-            _ = policy(images, text_input)
+            _ = policy(batch)
     if DEVICE == "cuda":
         torch.cuda.synchronize()
     
@@ -54,7 +62,7 @@ def main():
         start_time = time.perf_counter()
         
         with torch.no_grad():
-            _ = policy(images, text_input)
+            _ = policy(batch)
         
         if DEVICE == "cuda":
             torch.cuda.synchronize()
