@@ -157,7 +157,7 @@ if __name__ == "__main__":
     dataset = generator.generate_dataset(num_examples=5000)
     
     # Save to JSON file
-    with open("cdpr_motion_dataset.json", "w") as f:
+    with open("dataset/cdpr_motion_dataset.json", "w") as f:
         json.dump(dataset, f, indent=2)
     
     print(f"Generated {len(dataset)} training examples.")
