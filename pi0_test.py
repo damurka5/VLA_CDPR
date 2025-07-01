@@ -23,14 +23,15 @@ def prepare_inputs(image_path, prompt, device):
     img_tensor = img_tensor.permute(2, 0, 1)  # HWC -> CHW
     img_tensor = img_tensor.unsqueeze(0).to(device)  # Add batch dim
     
-    # Prepare proper input dictionary
+    # Prepare proper input dictionary with image features
     batch = {
         "observation": {
-            "image": img_tensor,
+            "image_primary": img_tensor,  # Changed from 'image' to 'image_primary'
             "timestep_pad_mask": torch.ones(1, dtype=torch.bool).to(device)
         },
         "task": {
-            "language_instruction": [prompt]
+            "language_instruction": [prompt],
+            "language_instruction_encoded": torch.ones(1, 1, dtype=torch.long).to(device)  # Dummy tokens
         }
     }
     
