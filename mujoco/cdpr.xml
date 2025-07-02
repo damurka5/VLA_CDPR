@@ -1,0 +1,163 @@
+<mujoco>
+  <compiler autolimits="true"/>
+  <default>
+    <site type="sphere" rgba="1 0 0 1" size="0.005"/>
+    <tendon rgba="0 1 0 1"/>
+  </default>
+  <visual>
+    <headlight diffuse=".7 .7 .7"/>
+  </visual>
+
+  <worldbody>
+    <!-- Left part -->
+    <body name="rotor_1_up" pos="-1.154 -1.404 3.220" euler="90 45 0">
+      <geom name="rotor_1_up" type="cylinder" size=".025 .05"/>
+      <site name="top_main_site_1" pos="-0.025 0.00001 0" />
+      <site name="top_sidesite_1" pos="0 0.05 0" />
+
+      <body name="rotor_1_down" pos="0 -1 0" euler="0 0 0">
+        <geom name="rotor_1_down" type="cylinder" size=".025 .05"/>
+        <site name="bot_main_site_1" pos="0.025 -0.00001 0" />
+        <site name="bot_sidesite_1" pos="0 -0.05 0" />
+
+        <body name="slider_1" pos="-3 0 0">
+          <inertial pos="0 0 0" mass="100" diaginertia="0.0001 0.0001 0.0001" />
+          <joint name="slider_1" type="slide" axis="-1 0 0" />
+          <geom type="box" size="0.01 0.01 0.01" />
+          <site name="slider_1" pos="0.01 0 0"/>
+        </body>
+      </body>
+    </body>
+
+    <body name="rotor_2_up" pos=" 1.154 -1.404 3.220" euler="90 135 0">
+      <geom name="rotor_2_up" type="cylinder" size=".025 .05"/>
+      <site name="top_main_site_2" pos="-0.025 0.00001 0" />
+      <site name="top_sidesite_2" pos="0 0.05 0" />
+
+      <body name="rotor_2_down" pos="0 -1 0" euler="0 0 0">
+        <geom name="rotor_2_down" type="cylinder" size=".025 .05"/>
+        <site name="bot_main_site_2" pos="0.025 -0.00001 0" />
+        <site name="bot_sidesite_2" pos="0 -0.05 0" />
+
+        <body name="slider_2" pos="-3 0 0">
+          <inertial pos="0 0 0" mass="100" diaginertia="0.0001 0.0001 0.0001" />
+          <joint name="slider_2" type="slide" axis="-1 0 0" />
+          <geom type="box" size="0.01 0.01 0.01" />
+          <site name="slider_2" pos="0.01 0 0"/>
+        </body>
+      </body>
+    </body>
+
+    <body name="rotor_3_up" pos="1.154 1.404 3.220" euler="90 -135 0">
+      <geom name="rotor_3_up" type="cylinder" size=".025 .05"/>
+      <site name="top_main_site_3" pos="-0.025 0.00001 0" />
+      <site name="top_sidesite_3" pos="0 0.05 0" />
+
+      <body name="rotor_3_down" pos="0 -1 0" euler="0 0 0">
+        <geom name="rotor_3_down" type="cylinder" size=".025 .05"/>
+        <site name="bot_main_site_3" pos="0.025 -0.00001 0" />
+        <site name="bot_sidesite_3" pos="0 -0.05 0" />
+
+        <body name="slider_3" pos="-3 0 0">
+          <inertial pos="0 0 0" mass="100" diaginertia="0.0001 0.0001 0.0001" />
+          <joint name="slider_3" type="slide" axis="-1 0 0" />
+          <geom type="box" size="0.01 0.01 0.01" />
+          <site name="slider_3" pos="0.01 0 0"/>
+        </body>
+      </body>
+    </body>
+
+    <body name="rotor_4_up" pos="-1.154 1.404 3.220" euler="90  -45 0">
+      <geom name="rotor_4_up" type="cylinder" size=".025 .05"/>
+      <site name="top_main_site_4" pos="-0.025 0.00001 0" />
+      <site name="top_sidesite_4" pos="0 0.05 0" />
+
+      <body name="rotor_4_down" pos="0 -1 0" euler="0 0 0">
+        <geom name="rotor_4_down" type="cylinder" size=".025 .05"/>
+        <site name="bot_main_site_4" pos="0.025 -0.00001 0" />
+        <site name="bot_sidesite_4" pos="0 -0.05 0" />
+
+        <body name="slider_4" pos="-3 0 0">
+          <inertial pos="0 0 0" mass="100" diaginertia="0.0001 0.0001 0.0001" />
+          <joint name="slider_4" type="slide" axis="-1 0 0" />
+          <geom type="box" size="0.01 0.01 0.01" />
+          <site name="slider_4" pos="0.01 0 0"/>
+        </body>
+      </body>
+    </body>
+
+    <!-- Floor -->
+    <geom name="floor" type="plane" size="5 5 0.1" pos="0 0 -0.1" rgba="0.8 0.8 0.8 1"/>
+    
+    <!-- Red square object on floor -->
+    <body name="target_object" pos="0.5 0.5 0">
+      <geom type="box" size="0.1 0.1 0.01" rgba="1 0 0 1"/>
+    </body>
+
+    <!-- End-effector -->
+    <body name="box" pos="0 0 0">
+    <freejoint />
+    <inertial pos="0 0 0" mass="1" diaginertia="0.001 0.001 0.001"/>
+    <geom name="box" type="box" size="0.05 0.05 0.05" />
+    <site name="corner_1" pos="-0.05  -0.05 0.05" />
+    <site name="corner_2" pos=" 0.05  -0.05 0.05" />
+    <site name="corner_3" pos=" 0.05 0.05 0.05" />
+    <site name="corner_4" pos="-0.05 0.05 0.05" />
+    
+    <!-- Camera attached to end effector looking downward -->
+    <body name="camera_body" pos="0 0 0.1" euler="0 0 0">
+        <camera name="ee_camera" mode="fixed" fovy="60"/>
+    </body>
+    </body>
+  </worldbody>
+
+  <tendon>
+    <spatial name="rope_1" range="0 6.5" stiffness="0" damping="0" >
+      <site site="corner_1" />
+      <geom geom="rotor_1_up" sidesite="top_sidesite_1" />
+      <site site="top_main_site_1" />
+      <site site="bot_main_site_1" />
+      <geom geom="rotor_1_down" sidesite="bot_sidesite_1" />
+      <site site="slider_1" />
+    </spatial>
+
+    <spatial name="rope_2" range="0 6.5" stiffness="0" damping="0" >
+      <site site="corner_2" />
+      <geom geom="rotor_2_up" sidesite="top_sidesite_2" />
+      <site site="top_main_site_2" />
+      <site site="bot_main_site_2" />
+      <geom geom="rotor_2_down" sidesite="bot_sidesite_2" />
+      <site site="slider_2" />
+    </spatial>
+
+    <spatial name="rope_3" range="0 6.5" stiffness="0" damping="0" >
+      <site site="corner_3" />
+      <geom geom="rotor_3_up" sidesite="top_sidesite_3" />
+      <site site="top_main_site_3" />
+      <site site="bot_main_site_3" />
+      <geom geom="rotor_3_down" sidesite="bot_sidesite_3" />
+      <site site="slider_3" />
+    </spatial>
+
+    <spatial name="rope_4" range="0 6.5" stiffness="0" damping="0" >
+      <site site="corner_4" />
+      <geom geom="rotor_4_up" sidesite="top_sidesite_4" />
+      <site site="top_main_site_4" />
+      <site site="bot_main_site_4" />
+      <geom geom="rotor_4_down" sidesite="bot_sidesite_4" />
+      <site site="slider_4" />
+    </spatial>
+  </tendon>
+
+  <actuator>
+    <motor name="slider_1" joint="slider_1" ctrlrange="-4.5 45"/>
+    <motor name="slider_2" joint="slider_2" ctrlrange="-4.5 45"/>
+    <motor name="slider_3" joint="slider_3" ctrlrange="-4.5 45"/>
+    <motor name="slider_4" joint="slider_4" ctrlrange="-4.5 45"/>
+  </actuator>
+
+  <sensor>
+    <framepos objtype="camera" objname="ee_camera"/>
+    <framequat objtype="camera" objname="ee_camera"/>
+  </sensor>
+</mujoco>
