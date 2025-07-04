@@ -1,6 +1,45 @@
 # VLA_CDPR
 VLA models application in CDPR
 
+## LLM Perspective
+
+- **Model Selection**  
+  Tested different Vision-Language-Action (VLA) models and selected OpenVLA as the base architecture
+
+- **Dataset Preparation**  
+  Created text dataset (prompts to language model) specifically for Cable-Driven Parallel Robot (CDPR) control  
+  Location: `dataset/`
+
+- **Simulation Environment**  
+  Developed MuJoCo model of CDPR with end-effector camera  
+  Location: `mujoco/cdpr.xml`
+
+- **Training Infrastructure**  
+  Implemented code to train VLA directly from MuJoCo simulation data  
+  Location: `mujoco/`
+
+- **Fine-Tuning Implementation**  
+  Prepared specialized fine-tuning code for OpenVLA's language model (Llama2-based)  
+  Location: `tuning/Llama2_tuning.py`
+
+## AgenticAI Perspective
+
+- **RL Fine-Tuning**  
+  Developed reinforcement learning pipeline for optimizing OpenVLA's CDPR control  
+  Location: `tuning/finetune_rl.py`
+
+- **Simulation Integration**  
+  Enhanced MuJoCo CDPR model with real-time simulation capabilities  
+  Location: `mujoco/run_mujoco.py`
+
+- **Safety System**  
+  Implemented safety agent that evaluates motion requests for potential hazards  
+  Location: `safety/agent.py`
+
+- **Safety Training**  
+  Created training script for safety agent's classification capabilities  
+  Integrated within: `safety/agent.py`
+
 ## **Problem**
 
 - Standard VLA (Video-Language-Action) models lack physical understanding of concepts like mass, gravity, and inertia.
