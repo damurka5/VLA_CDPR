@@ -1,4 +1,7 @@
 import os
+os.environ['MUJOCO_GL'] = 'egl'  # 'osmesa'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Disable oneDNN warnings
+
 import glfw
 import mujoco as mj
 import numpy as np
