@@ -20,8 +20,8 @@
         <site name="bot_sidesite_1" pos="0 -0.05 0" />
 
         <body name="slider_1" pos="-2 0 0">
-          <inertial pos="0 0 0" mass="100" diaginertia="0.0001 0.0001 0.0001" />
-          <joint name="slider_1" type="slide" axis="-1 0 0" />
+          <inertial pos="0 0 0" mass="2" diaginertia="0.0001 0.0001 0.0001" />
+          <joint name="slider_1" type="slide" axis="-1 0 0" damping="5"/>
           <geom type="box" size="0.01 0.01 0.01" />
           <site name="slider_1" pos="0.01 0 0"/>
         </body>
@@ -39,8 +39,8 @@
         <site name="bot_sidesite_2" pos="0 -0.05 0" />
 
         <body name="slider_2" pos="-2 0 0">
-          <inertial pos="0 0 0" mass="100" diaginertia="0.0001 0.0001 0.0001" />
-          <joint name="slider_2" type="slide" axis="-1 0 0" />
+          <inertial pos="0 0 0" mass="2" diaginertia="0.0001 0.0001 0.0001" />
+          <joint name="slider_2" type="slide" axis="-1 0 0" damping="5"/>
           <geom type="box" size="0.01 0.01 0.01" />
           <site name="slider_2" pos="0.01 0 0"/>
         </body>
@@ -58,8 +58,8 @@
         <site name="bot_sidesite_3" pos="0 -0.05 0" />
 
         <body name="slider_3" pos="-2 0 0">
-          <inertial pos="0 0 0" mass="100" diaginertia="0.0001 0.0001 0.0001" />
-          <joint name="slider_3" type="slide" axis="-1 0 0" />
+          <inertial pos="0 0 0" mass="2" diaginertia="0.0001 0.0001 0.0001" />
+          <joint name="slider_3" type="slide" axis="-1 0 0" damping="5"/>
           <geom type="box" size="0.01 0.01 0.01" />
           <site name="slider_3" pos="0.01 0 0"/>
         </body>
@@ -77,8 +77,8 @@
         <site name="bot_sidesite_4" pos="0 -0.05 0" />
 
         <body name="slider_4" pos="-2 0 0">
-          <inertial pos="0 0 0" mass="100" diaginertia="0.0001 0.0001 0.0001" />
-          <joint name="slider_4" type="slide" axis="-1 0 0" />
+          <inertial pos="0 0 0" mass="2" diaginertia="0.0001 0.0001 0.0001" />
+          <joint name="slider_4" type="slide" axis="-1 0 0" damping="5"/>
           <geom type="box" size="0.01 0.01 0.01" />
           <site name="slider_4" pos="0.01 0 0"/>
         </body>
@@ -149,11 +149,17 @@
     </spatial>
   </tendon>
 
-  <actuator>
+  <!-- <actuator>
     <motor name="slider_1" joint="slider_1" ctrlrange="-4.5 65"/>
     <motor name="slider_2" joint="slider_2" ctrlrange="-4.5 65"/>
     <motor name="slider_3" joint="slider_3" ctrlrange="-4.5 65"/>
     <motor name="slider_4" joint="slider_4" ctrlrange="-4.5 65"/>
+  </actuator> -->
+  <actuator>
+    <position name="slider_1_pos" joint="slider_1" ctrlrange="-4.5 4.5" kp="100" kv="100"/>
+    <position name="slider_2_pos" joint="slider_2" ctrlrange="-4.5 4.5" kp="100" kv="100"/>
+    <position name="slider_3_pos" joint="slider_3" ctrlrange="-4.5 4.5" kp="100" kv="100"/>
+    <position name="slider_4_pos" joint="slider_4" ctrlrange="-4.5 4.5" kp="100" kv="100"/>
   </actuator>
 
   <sensor>

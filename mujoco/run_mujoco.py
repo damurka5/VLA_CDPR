@@ -176,26 +176,34 @@ while not glfw.window_should_close(window):
     
     # PD Control logic
     if received_goal:
-        # Calculate cable length errors
+        # # Calculate cable length errors
         length_errors = target_lengths - cur_lengths
         
-        # Calculate cable velocity (derivative term)
-        # Note: This is a simple finite difference approximation
-        cable_velocities = (cur_lengths - robot.prev_lengths) / dt
+        # # Calculate cable velocity (derivative term)
+        # # Note: This is a simple finite difference approximation
+        # cable_velocities = (cur_lengths - robot.prev_lengths) / dt
         
-        print(f'length_errors: {length_errors}')
+        # print(f'length_errors: {length_errors}')
         
-        # PD control law: control = Kp * error + Kd * (-velocity)
-        # We use negative velocity because we want to counteract motion away from target
-        control_signals = Kp * length_errors - Kd * cable_velocities
+        # # PD control law: control = Kp * error + Kd * (-velocity)
+        # # We use negative velocity because we want to counteract motion away from target
+        # control_signals = Kp * length_errors - Kd * cable_velocities
         
-        # print(f'control_signals: {-control_signals}')
-        # Apply control signals
+        # # print(f'control_signals: {-control_signals}')
+        # # Apply control signals
+        # for i in range(4):
+        #     data.ctrl[i] = -control_signals[i]
+        
+        # # Store current lengths for next derivative calculation
+        # robot.prev_lengths = cur_lengths.copy()
+        
+        # Convert cable length changes to slider position changes
+        slider_positions = 0.926 - target_lengths  # Assuming initial cable length is 4.235
+
         for i in range(4):
-            data.ctrl[i] = -control_signals[i]
+            data.ctrl[i] = slider_positions[i]
         
-        # Store current lengths for next derivative calculation
-        robot.prev_lengths = cur_lengths.copy()
+        print(f'forces: {data.actuator_force}')
         
         # Check if we've reached the goal
         if np.all(np.abs(length_errors) < threshold):
