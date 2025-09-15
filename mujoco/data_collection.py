@@ -4,6 +4,9 @@ import mujoco as mj
 import numpy as np
 from mujoco.glfw import glfw
 import cv2  # OpenCV for image display
+import tensorflow as tf
+import time
+from datetime import datetime
 
 class CDPR4:
     def __init__(self, approx=1, pos=np.array([0, 0, 0])):
@@ -30,9 +33,44 @@ class CDPR4:
             
         lengths = []
         for i in range(4):
-            vec = pos - self.frame_points[i]
+            ee_pos_global = pos + self.ee_points[i]
+            vec = ee_pos_global - self.frame_points[i]
             lengths.append(np.linalg.norm(vec))
         return tuple(lengths)
+
+# RLDS Data Collection Setup
+def create_feature_description():
+    """Create feature description for TFRecord."""
+    return {
+        'steps': tf.io.FixedLenFeature([], tf.string),
+        'episode_metadata': tf.io.FixedLenFeature([], tf.string),
+    }
+
+def serialize_episode(steps, episode_metadata):
+    """Serialize an episode to TFRecord format."""
+    feature = {
+        'steps': tf.train.Feature(
+            bytes_list=tf.train.BytesList(value=[tf.io.serialize_tensor(steps).numpy()])
+        ),
+        'episode_metadata': tf.train.Feature(
+            bytes_list=tf.train.BytesList(value=[tf.io.serialize_tensor(episode_metadata).numpy()])
+        ),
+    }
+    return tf.train.Example(features=tf.train.Features(feature=feature)).SerializeToString()
+
+def create_step_data(image, end_effector_pos, control_signals, timestamp):
+    """Create a step data dictionary in RLDS format."""
+    return {
+        'observation': {
+            'image': image,
+            'end_effector_position': end_effector_pos,
+        },
+        'action': control_signals,
+        'timestamp': timestamp,
+        'is_first': False,
+        'is_last': False,
+        'is_terminal': False,
+    }
 
 # Initialize simulation
 xml_path = 'mujoco/cdpr.xml'
@@ -47,8 +85,8 @@ lastx = 0
 lasty = 0
 
 # PD controller parameters
-Kp = 100  # Proportional gain
-Kd = 130   # Derivative gain
+Kp = 200  # Proportional gain
+Kd = 355   # Derivative gain
 
 def init_controller(model, data):
     # Initialize any controller-specific parameters here
@@ -127,18 +165,28 @@ init_controller(model, data)
 mj.set_mjcb_control(controller)
 
 # Initialize robot controller with correct initial position
-initial_pos = np.array([0, 0, 1.309])
+initial_pos = np.array([0, 0, 0])
 robot = CDPR4(approx=1, pos=initial_pos)
 
 # Create camera window
 cv2.namedWindow("End-Effector Camera View", cv2.WINDOW_NORMAL)
 cv2.resizeWindow("End-Effector Camera View", 640, 480)
 
+# RLDS Data Collection Setup
+output_dir = "rlds_data"
+os.makedirs(output_dir, exist_ok=True)
+
 # Main simulation loop
 received_goal = False
 threshold = 0.03
 dt = 1.0/60.0  # Simulation time step
-target_pos = np.array([0, 0, 1.309])  # Initialize target position
+target_pos = np.array([0, 0, 0])  # Initialize target position
+
+# Data collection variables
+episode_data = []
+current_episode = 0
+recording = False
+episode_start_time = 0
 
 while not glfw.window_should_close(window):
     time_prev = data.time
@@ -148,21 +196,26 @@ while not glfw.window_should_close(window):
     robot.pos = Ac.copy()  # Update the robot's current position
     
     # User input for new position
-    # if data.time > 2 and not received_goal:
-    if not received_goal:
+    if data.time > 2 and not received_goal:
         print(f"\nCurrent position: {Ac[0]:.3f} {Ac[1]:.3f} {Ac[2]:.3f}")
         print("Enter new desired position for the center of box (X Y Z):")
         try:
             ax_new, ay_new, az_new = map(float, input("Coordinates: ").split())
-            if all(-1.309 <= coord <= 1.309 for coord in [ax_new, ay_new, az_new]):
+            if all(-3.22 <= coord <= 3.22 for coord in [ax_new, ay_new, az_new]):
                 received_goal = True
                 target_pos = np.array([ax_new, ay_new, az_new])
                 # Reset previous lengths when setting a new goal
                 cur_L_1, cur_L_2, cur_L_3, cur_L_4 = robot.inverse_kinematics()
                 robot.prev_lengths = np.array([cur_L_1, cur_L_2, cur_L_3, cur_L_4])
                 print(f"Target position set to: {target_pos}")
+                
+                # Start recording data for this episode
+                recording = True
+                episode_start_time = data.time
+                episode_data = []
+                print("Started recording episode data...")
             else:
-                print("Coordinates must be in range (-1.309, 1.309). Try again.")
+                print("Coordinates must be in range (-3.22, 3.22). Try again.")
         except:
             print("Invalid input. Please enter three numbers separated by spaces.")
     
@@ -175,6 +228,7 @@ while not glfw.window_should_close(window):
     target_lengths = np.array([target_L_1, target_L_2, target_L_3, target_L_4])
     
     # PD Control logic
+    control_signals = np.zeros(4)
     if received_goal:
         # Calculate cable length errors
         length_errors = target_lengths - cur_lengths
@@ -189,7 +243,6 @@ while not glfw.window_should_close(window):
         # We use negative velocity because we want to counteract motion away from target
         control_signals = Kp * length_errors - Kd * cable_velocities
         
-        # print(f'control_signals: {-control_signals}')
         # Apply control signals
         for i in range(4):
             data.ctrl[i] = -control_signals[i]
@@ -201,6 +254,99 @@ while not glfw.window_should_close(window):
         if np.all(np.abs(length_errors) < threshold):
             print("Reached goal position!")
             received_goal = False
+            recording = False
+            
+            # Save the episode data
+            if episode_data:
+                # Convert to tensors
+                steps_tensor = tf.convert_to_tensor(episode_data, dtype=tf.float32)
+                episode_metadata = tf.convert_to_tensor({
+                    'episode_id': current_episode,
+                    'start_time': episode_start_time,
+                    'end_time': data.time,
+                    'target_position': target_pos,
+                    'success': True
+                }, dtype=tf.string)
+                
+                # Create filename with timestamp
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"episode_{current_episode}_{timestamp}.tfrecord"
+                filepath = os.path.join(output_dir, filename)
+                
+                # Serialize and save
+                serialized_episode = serialize_episode(steps_tensor, episode_metadata)
+                with tf.io.TFRecordWriter(filepath) as writer:
+                    writer.write(serialized_episode)
+                
+                print(f"Saved episode {current_episode} to {filepath}")
+                current_episode += 1
+    
+    # Capture and store data if recording
+    if recording:
+        # Capture end-effector camera view
+        ee_cam = mj.MjvCamera()
+        ee_cam.type = mj.mjtCamera.mjCAMERA_FIXED
+        ee_cam.fixedcamid = mj.mj_name2id(model, mj.mjtObj.mjOBJ_CAMERA, "ee_camera")
+        
+        # Offscreen rendering setup
+        offwidth, offheight = 640, 480
+        offviewport = mj.MjrRect(0, 0, offwidth, offheight)
+        con = mj.MjrContext(model, mj.mjtFontScale.mjFONTSCALE_150.value)
+        mj.mjr_setBuffer(mj.mjtFramebuffer.mjFB_OFFSCREEN, con)
+        
+        # Allocate buffers
+        rgb_buffer = np.zeros((offheight, offwidth, 3), dtype=np.uint8)
+        depth_buffer = np.zeros((offheight, offwidth), dtype=np.float32)
+        
+        # Render camera view
+        mj.mjv_updateScene(model, data, opt, None, ee_cam, mj.mjtCatBit.mjCAT_ALL.value, scene)
+        mj.mjr_render(offviewport, scene, con)
+        mj.mjr_readPixels(rgb_buffer, depth_buffer, offviewport, con)
+        
+        # Process image for OpenCV and storage
+        rgb_buffer = np.flipud(rgb_buffer)
+        bgr_buffer = cv2.cvtColor(rgb_buffer, cv2.COLOR_RGB2BGR)
+        
+        # Store step data
+        step_data = create_step_data(
+            image=rgb_buffer,  # Store RGB image
+            end_effector_pos=Ac.copy(),
+            control_signals=control_signals.copy(),
+            timestamp=data.time
+        )
+        episode_data.append(step_data)
+        
+        # Show in separate window
+        cv2.imshow("End-Effector Camera View", bgr_buffer)
+        cv2.waitKey(1)
+        
+        # Restore default framebuffer
+        mj.mjr_setBuffer(mj.mjtFramebuffer.mjFB_WINDOW, con)
+    else:
+        # Just render without storing data
+        ee_cam = mj.MjvCamera()
+        ee_cam.type = mj.mjtCamera.mjCAMERA_FIXED
+        ee_cam.fixedcamid = mj.mj_name2id(model, mj.mjtObj.mjOBJ_CAMERA, "ee_camera")
+        
+        offwidth, offheight = 640, 480
+        offviewport = mj.MjrRect(0, 0, offwidth, offheight)
+        con = mj.MjrContext(model, mj.mjtFontScale.mjFONTSCALE_150.value)
+        mj.mjr_setBuffer(mj.mjtFramebuffer.mjFB_OFFSCREEN, con)
+        
+        rgb_buffer = np.zeros((offheight, offwidth, 3), dtype=np.uint8)
+        depth_buffer = np.zeros((offheight, offwidth), dtype=np.float32)
+        
+        mj.mjv_updateScene(model, data, opt, None, ee_cam, mj.mjtCatBit.mjCAT_ALL.value, scene)
+        mj.mjr_render(offviewport, scene, con)
+        mj.mjr_readPixels(rgb_buffer, depth_buffer, offviewport, con)
+        
+        rgb_buffer = np.flipud(rgb_buffer)
+        bgr_buffer = cv2.cvtColor(rgb_buffer, cv2.COLOR_RGB2BGR)
+        
+        cv2.imshow("End-Effector Camera View", bgr_buffer)
+        cv2.waitKey(1)
+        
+        mj.mjr_setBuffer(mj.mjtFramebuffer.mjFB_WINDOW, con)
     
     # Step simulation
     step_time = data.time
@@ -215,37 +361,6 @@ while not glfw.window_should_close(window):
     viewport = mj.MjrRect(0, 0, viewport_width, viewport_height)
     mj.mjv_updateScene(model, data, opt, None, cam, mj.mjtCatBit.mjCAT_ALL.value, scene)
     mj.mjr_render(viewport, scene, context)
-    
-    # Capture end-effector camera view
-    ee_cam = mj.MjvCamera()
-    ee_cam.type = mj.mjtCamera.mjCAMERA_FIXED
-    ee_cam.fixedcamid = mj.mj_name2id(model, mj.mjtObj.mjOBJ_CAMERA, "ee_camera")
-    
-    # Offscreen rendering setup
-    offwidth, offheight = 640, 480
-    offviewport = mj.MjrRect(0, 0, offwidth, offheight)
-    con = mj.MjrContext(model, mj.mjtFontScale.mjFONTSCALE_150.value)
-    mj.mjr_setBuffer(mj.mjtFramebuffer.mjFB_OFFSCREEN, con)
-    
-    # Allocate buffers
-    rgb_buffer = np.zeros((offheight, offwidth, 3), dtype=np.uint8)
-    depth_buffer = np.zeros((offheight, offwidth), dtype=np.float32)
-    
-    # Render camera view
-    mj.mjv_updateScene(model, data, opt, None, ee_cam, mj.mjtCatBit.mjCAT_ALL.value, scene)
-    mj.mjr_render(offviewport, scene, con)
-    mj.mjr_readPixels(rgb_buffer, depth_buffer, offviewport, con)
-    
-    # Process image for OpenCV
-    rgb_buffer = np.flipud(rgb_buffer)
-    bgr_buffer = cv2.cvtColor(rgb_buffer, cv2.COLOR_RGB2BGR)
-    
-    # Show in separate window
-    cv2.imshow("End-Effector Camera View", bgr_buffer)
-    cv2.waitKey(1)
-    
-    # Restore default framebuffer
-    mj.mjr_setBuffer(mj.mjtFramebuffer.mjFB_WINDOW, con)
     
     glfw.swap_buffers(window)
     glfw.poll_events()
