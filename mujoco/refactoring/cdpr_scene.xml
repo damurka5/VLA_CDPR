@@ -1,0 +1,226 @@
+<mujoco model="cdpr_arena">
+  <compiler autolimits="true"/>
+  
+  <asset>
+    <texture builtin="gradient" height="256" rgb1=".9 .9 1." rgb2=".2 .3 .4" type="skybox" width="256"/>
+    
+    <!-- floor texture -->
+    <texture file="../textures/tile_grigia_caldera_porcelain_floor.png" type="2d" name="texplane"/>
+    <material name="floorplane" reflectance="0.0" shininess="0.0" specular="0.0" texrepeat="3 3" texture="texplane" texuniform="true"/>
+
+    <!-- wall texture -->
+    <texture file="../textures/smooth_light_gray_plaster.png" type="2d" name="tex-wall"/>
+    <material name="walls_mat" reflectance="0.0" shininess="0.3" specular="0.8" texrepeat="3 3" texture="tex-wall" texuniform="true" />
+
+    <!-- CDPR materials -->
+    <material name="rope_mat" rgba="0 1 0 1"/>
+    <material name="rotor_mat" rgba="0.7 0.7 0.7 1"/>
+    <material name="ee_mat" rgba="0.2 0.6 1 1"/>
+    <material name="target_mat" rgba="1 0 0 1"/>
+    <material name="slider_mat" rgba="0.5 0.5 0.5 1"/>
+  </asset>
+  
+  <default>
+    <site type="sphere" rgba="1 0 0 1" size="0.005"/>
+    <tendon rgba="0 1 0 1" width="0.002"/>
+  </default>
+
+  <worldbody>
+    <!-- Floor -->
+    <geom condim="3" group="1" material="floorplane" name="floor" pos="0 0 -0.1" size="5 5 0.1" type="plane"/>
+
+    <!-- Walls -->
+    <geom pos="0 5 1.5" quat="0.7071 0.7071 0 0" size="2.5 1.5 0.01" type="box" conaffinity="0" contype="0" group="1" name="wall_left" material="walls_mat"/>
+    <geom pos="0 -5 1.5" quat="0.7071 -0.7071 0 0" size="2.5 1.5 0.01" type="box" conaffinity="0" contype="0" group="1" name="wall_right" material="walls_mat"/>
+    <geom pos="-5 0 1.5" quat="0.5 0.5 0.5 0.5" size="3 1.5 0.01" type="box" conaffinity="0" contype="0" group="1" name="wall_rear" material="walls_mat"/>
+    <geom pos="5 0 1.5" quat="0.5 0.5 -0.5 -0.5" size="3 1.5 0.01" type="box" conaffinity="0" contype="0" group="1" name="wall_front" material="walls_mat"/>
+
+    <!-- CDPR Frame Structure - Arm 1 -->
+    <body name="rotor_1_up" pos="-0.535 -0.755 1.309" euler="90 45 0">
+      <geom name="rotor_1_up" type="cylinder" size=".025 .05" material="rotor_mat"/>
+      <site name="top_main_site_1" pos="-0.025 0.00001 0" />
+      <site name="top_sidesite_1" pos="0 0.05 0" />
+
+      <body name="rotor_1_down" pos="0 -1.309 0" euler="0 0 0">
+        <geom name="rotor_1_down" type="cylinder" size=".025 .05" material="rotor_mat"/>
+        <site name="bot_main_site_1" pos="0.025 -0.00001 0" />
+        <site name="bot_sidesite_1" pos="0 -0.05 0" />
+
+        <body name="slider_1" pos="-2 0 0">
+          <inertial pos="0 0 0" mass="2" diaginertia="0.0001 0.0001 0.0001" />
+          <joint name="slider_1" type="slide" axis="-1 0 0" damping="5"/>
+          <geom type="box" size="0.01 0.01 0.01" material="slider_mat"/>
+          <site name="slider_1" pos="0.01 0 0"/>
+        </body>
+      </body>
+    </body>
+
+    <!-- CDPR Frame Structure - Arm 2 -->
+    <body name="rotor_2_up" pos="0.755 -0.525 1.309" euler="90 135 0">
+      <geom name="rotor_2_up" type="cylinder" size=".025 .05" material="rotor_mat"/>
+      <site name="top_main_site_2" pos="-0.025 0.00001 0" />
+      <site name="top_sidesite_2" pos="0 0.05 0" />
+
+      <body name="rotor_2_down" pos="0 -1.309 0" euler="0 0 0">
+        <geom name="rotor_2_down" type="cylinder" size=".025 .05" material="rotor_mat"/>
+        <site name="bot_main_site_2" pos="0.025 -0.00001 0" />
+        <site name="bot_sidesite_2" pos="0 -0.05 0" />
+
+        <body name="slider_2" pos="-2 0 0">
+          <inertial pos="0 0 0" mass="2" diaginertia="0.0001 0.0001 0.0001" />
+          <joint name="slider_2" type="slide" axis="-1 0 0" damping="5"/>
+          <geom type="box" size="0.01 0.01 0.01" material="slider_mat"/>
+          <site name="slider_2" pos="0.01 0 0"/>
+        </body>
+      </body>
+    </body>
+
+    <!-- CDPR Frame Structure - Arm 3 -->
+    <body name="rotor_3_up" pos="0.535 0.755 1.309" euler="90 -135 0">
+      <geom name="rotor_3_up" type="cylinder" size=".025 .05" material="rotor_mat"/>
+      <site name="top_main_site_3" pos="-0.025 0.00001 0" />
+      <site name="top_sidesite_3" pos="0 0.05 0" />
+
+      <body name="rotor_3_down" pos="0 -1.309 0" euler="0 0 0">
+        <geom name="rotor_3_down" type="cylinder" size=".025 .05" material="rotor_mat"/>
+        <site name="bot_main_site_3" pos="0.025 -0.00001 0" />
+        <site name="bot_sidesite_3" pos="0 -0.05 0" />
+
+        <body name="slider_3" pos="-2 0 0">
+          <inertial pos="0 0 0" mass="2" diaginertia="0.0001 0.0001 0.0001" />
+          <joint name="slider_3" type="slide" axis="-1 0 0" damping="5"/>
+          <geom type="box" size="0.01 0.01 0.01" material="slider_mat"/>
+          <site name="slider_3" pos="0.01 0 0"/>
+        </body>
+      </body>
+    </body>
+
+    <!-- CDPR Frame Structure - Arm 4 -->
+    <body name="rotor_4_up" pos="-0.755 0.525 1.309" euler="90 -45 0">
+      <geom name="rotor_4_up" type="cylinder" size=".025 .05" material="rotor_mat"/>
+      <site name="top_main_site_4" pos="-0.025 0.00001 0" />
+      <site name="top_sidesite_4" pos="0 0.05 0" />
+
+      <body name="rotor_4_down" pos="0 -1.309 0" euler="0 0 0">
+        <geom name="rotor_4_down" type="cylinder" size=".025 .05" material="rotor_mat"/>
+        <site name="bot_main_site_4" pos="0.025 -0.00001 0" />
+        <site name="bot_sidesite_4" pos="0 -0.05 0" />
+
+        <body name="slider_4" pos="-2 0 0">
+          <inertial pos="0 0 0" mass="2" diaginertia="0.0001 0.0001 0.0001" />
+          <joint name="slider_4" type="slide" axis="-1 0 0" damping="5"/>
+          <geom type="box" size="0.01 0.01 0.01" material="slider_mat"/>
+          <site name="slider_4" pos="0.01 0 0"/>
+        </body>
+      </body>
+    </body>
+
+    <!-- Target object -->
+    <body name="target_object" pos="0.5 0.5 0">
+      <geom type="box" size="0.1 0.1 0.01" material="target_mat"/>
+    </body>
+
+    <!-- End-effector -->
+    <body name="box" pos="0 0 1.309">
+      <freejoint />
+      <inertial pos="0 0 0" mass="1" diaginertia="0.15 0.15 0.15"/>
+      <geom name="box" type="box" size="0.05 0.05 0.05" material="ee_mat"/>
+      <site name="topcenter" pos="0 0 0.05" />
+      <site name="corner_1" pos="-0.05 -0.05 0.05" />
+      <site name="corner_2" pos="0.05 -0.05 0.05" />
+      <site name="corner_3" pos="0.05 0.05 0.05" />
+      <site name="corner_4" pos="-0.05 0.05 0.05" />
+      
+      <!-- Camera attached to end effector -->
+      <body name="camera_body" pos="0 0 -0.1" euler="0 0 0">
+        <camera name="ee_camera" mode="fixed" fovy="60"/>
+      </body>
+    </body>
+
+    <!-- Cameras -->
+    <camera mode="fixed" name="overview" pos="2.0 2.0 2.0" quat="0.707 0.0 0.0 0.707"/>
+    <camera mode="fixed" name="sideview" pos="3.0 0.0 1.5" quat="0.707 0.0 0.0 0.707"/>
+    <camera mode="fixed" name="frontview" pos="0.0 3.0 1.5" quat="0.707 0.0 0.0 0.707"/>
+  </worldbody>
+
+  <tendon>
+    <spatial name="rope_1" limited="true" range="0 4.235" stiffness="0" damping="0">
+      <site site="topcenter" />
+      <geom geom="rotor_1_up" sidesite="top_sidesite_1" />
+      <site site="top_main_site_1" />
+      <site site="bot_main_site_1" />
+      <geom geom="rotor_1_down" sidesite="bot_sidesite_1" />
+      <site site="slider_1" />
+    </spatial>
+
+    <spatial name="rope_2" limited="true" range="0 4.235" stiffness="0" damping="0">
+      <site site="topcenter" />
+      <geom geom="rotor_2_up" sidesite="top_sidesite_2" />
+      <site site="top_main_site_2" />
+      <site site="bot_main_site_2" />
+      <geom geom="rotor_2_down" sidesite="bot_sidesite_2" />
+      <site site="slider_2" />
+    </spatial>
+
+    <spatial name="rope_3" limited="true" range="0 4.235" stiffness="0" damping="0">
+      <site site="topcenter" />
+      <geom geom="rotor_3_up" sidesite="top_sidesite_3" />
+      <site site="top_main_site_3" />
+      <site site="bot_main_site_3" />
+      <geom geom="rotor_3_down" sidesite="bot_sidesite_3" />
+      <site site="slider_3" />
+    </spatial>
+
+    <spatial name="rope_4" limited="true" range="0 4.235" stiffness="0" damping="0">
+      <site site="topcenter" />
+      <geom geom="rotor_4_up" sidesite="top_sidesite_4" />
+      <site site="top_main_site_4" />
+      <site site="bot_main_site_4" />
+      <geom geom="rotor_4_down" sidesite="bot_sidesite_4" />
+      <site site="slider_4" />
+    </spatial>
+  </tendon>
+
+  <actuator>
+    <position name="slider_1_pos" joint="slider_1" ctrlrange="-4.5 4.5" kp="100" kv="120"/>
+    <position name="slider_2_pos" joint="slider_2" ctrlrange="-4.5 4.5" kp="100" kv="120"/>
+    <position name="slider_3_pos" joint="slider_3" ctrlrange="-4.5 4.5" kp="100" kv="120"/>
+    <position name="slider_4_pos" joint="slider_4" ctrlrange="-4.5 4.5" kp="100" kv="120"/>
+  </actuator>
+
+  <sensor>
+    <!-- Camera sensors -->
+    <framepos objtype="camera" objname="ee_camera"/>
+    <framequat objtype="camera" objname="ee_camera"/>
+    
+    <!-- Slider position sensors -->
+    <jointpos name="slider_1_pos_sensor" joint="slider_1"/>
+    <jointpos name="slider_2_pos_sensor" joint="slider_2"/>
+    <jointpos name="slider_3_pos_sensor" joint="slider_3"/>
+    <jointpos name="slider_4_pos_sensor" joint="slider_4"/>
+    
+    <!-- End-effector position and orientation -->
+    <framepos objtype="body" objname="box"/>
+    <framequat objtype="body" objname="box"/>
+    
+    <!-- Cable length sensors (approximated from slider positions) -->
+    <user name="cable_length_1" datatype="real" needstage="acc"/>
+    <user name="cable_length_2" datatype="real" needstage="acc"/>
+    <user name="cable_length_3" datatype="real" needstage="acc"/>
+    <user name="cable_length_4" datatype="real" needstage="acc"/>
+  </sensor>
+
+  <equality>
+    <!-- Weld constraints for fixed parts of the CDPR frame -->
+    <weld name="weld_rotor_1" body1="rotor_1_up" body2="world" relpose="0 0 0 1 0 0 0"/>
+    <weld name="weld_rotor_2" body1="rotor_2_up" body2="world" relpose="0 0 0 1 0 0 0"/>
+    <weld name="weld_rotor_3" body1="rotor_3_up" body2="world" relpose="0 0 0 1 0 0 0"/>
+    <weld name="weld_rotor_4" body1="rotor_4_up" body2="world" relpose="0 0 0 1 0 0 0"/>
+  </equality>
+
+  <option>
+    <flag contact="disable"/>
+    <flag jointsolref="enable"/>
+    <flag jointsolimp="enable"/>
+  </option>
+</mujoco>

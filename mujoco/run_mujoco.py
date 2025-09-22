@@ -183,7 +183,7 @@ while not glfw.window_should_close(window):
         # # Note: This is a simple finite difference approximation
         # cable_velocities = (cur_lengths - robot.prev_lengths) / dt
         
-        # print(f'length_errors: {length_errors}')
+        print(f'length_errors: {length_errors}')
         
         # # PD control law: control = Kp * error + Kd * (-velocity)
         # # We use negative velocity because we want to counteract motion away from target
@@ -198,7 +198,7 @@ while not glfw.window_should_close(window):
         # robot.prev_lengths = cur_lengths.copy()
         
         # Convert cable length changes to slider position changes
-        slider_positions = 0.926 - target_lengths  # Assuming initial cable length is 4.235
+        slider_positions = 0.9 - target_lengths  # Assuming initial cable length is 4.235
 
         for i in range(4):
             data.ctrl[i] = slider_positions[i]

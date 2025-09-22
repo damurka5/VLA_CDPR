@@ -96,7 +96,7 @@
     <!-- End-effector -->
     <body name="box" pos="0 0 1.309">
     <freejoint />
-    <inertial pos="0 0 0" mass="1" diaginertia="0.05 0.05 0.05"/>
+    <inertial pos="0 0 0" mass="1" diaginertia="0.15 0.15 0.15"/>
     <geom name="box" type="box" size="0.05 0.05 0.05" />
     <site name="topcenter" pos="0 0 0.05" />
     <site name="corner_1" pos="-0.05  -0.05 0.05" />
@@ -149,17 +149,11 @@
     </spatial>
   </tendon>
 
-  <!-- <actuator>
-    <motor name="slider_1" joint="slider_1" ctrlrange="-4.5 65"/>
-    <motor name="slider_2" joint="slider_2" ctrlrange="-4.5 65"/>
-    <motor name="slider_3" joint="slider_3" ctrlrange="-4.5 65"/>
-    <motor name="slider_4" joint="slider_4" ctrlrange="-4.5 65"/>
-  </actuator> -->
   <actuator>
-    <position name="slider_1_pos" joint="slider_1" ctrlrange="-4.5 4.5" kp="100" kv="100"/>
-    <position name="slider_2_pos" joint="slider_2" ctrlrange="-4.5 4.5" kp="100" kv="100"/>
-    <position name="slider_3_pos" joint="slider_3" ctrlrange="-4.5 4.5" kp="100" kv="100"/>
-    <position name="slider_4_pos" joint="slider_4" ctrlrange="-4.5 4.5" kp="100" kv="100"/>
+    <position name="slider_1_pos" joint="slider_1" ctrlrange="-4.5 4.5" kp="100" kv="120"/>
+    <position name="slider_2_pos" joint="slider_2" ctrlrange="-4.5 4.5" kp="100" kv="120"/>
+    <position name="slider_3_pos" joint="slider_3" ctrlrange="-4.5 4.5" kp="100" kv="120"/>
+    <position name="slider_4_pos" joint="slider_4" ctrlrange="-4.5 4.5" kp="100" kv="120"/>
   </actuator>
 
   <sensor>

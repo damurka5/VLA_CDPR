@@ -1,0 +1,19 @@
+(define (problem cdpr_manipulation)
+    (:domain cdpr_domain)
+    
+    (:objects
+        box - object
+        target_object - object
+        workspace - region
+    )
+    
+    (:init
+        (at box (0 0 1.309))
+        (at target_object (0.5 0.5 0))
+        (region workspace (-1.0 -1.0) (1.0 1.0))
+    )
+    
+    (:goal (and
+        (at box target_object)
+    ))
+)
