@@ -1,0 +1,6 @@
+mujoco>=2.3.3
+numpy>=1.21.0
+opencv-python>=4.5.0
+imageio>=2.9.0
+imageio-ffmpeg>=0.4.5
+glfw>=2.5.0
