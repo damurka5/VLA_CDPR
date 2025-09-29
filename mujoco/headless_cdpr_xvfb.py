@@ -276,6 +276,34 @@ class HeadlessCDPRSimulation:
             except Exception as e:
                 print(f"Error saving EE camera video: {e}")
         
+                # Save raw frames for inspection
+        if self.render and self.ee_camera_frames:
+            try:
+                frames_dir = os.path.join(trajectory_dir, "ee_camera_frames")
+                os.makedirs(frames_dir, exist_ok=True)
+                
+                for i, frame in enumerate(self.ee_camera_frames):
+                    frame_path = os.path.join(frames_dir, f"frame_{i:06d}.png")
+                    imageio.imwrite(frame_path, frame)
+                
+                print(f"Saved {len(self.ee_camera_frames)} raw EE camera frames to {frames_dir}")
+            except Exception as e:
+                print(f"Error saving raw EE frames: {e}")
+
+        if self.render and self.overview_frames:
+            try:
+                frames_dir = os.path.join(trajectory_dir, "overview_frames")
+                os.makedirs(frames_dir, exist_ok=True)
+                
+                for i, frame in enumerate(self.overview_frames):
+                    frame_path = os.path.join(frames_dir, f"frame_{i:06d}.png")
+                    imageio.imwrite(frame_path, frame)
+                
+                print(f"Saved {len(self.overview_frames)} raw overview frames to {frames_dir}")
+            except Exception as e:
+                print(f"Error saving raw overview frames: {e}")
+
+        
         # Save trajectory data (always save this)
         try:
             trajectory_file = os.path.join(trajectory_dir, "trajectory_data.npz")
@@ -289,6 +317,8 @@ class HeadlessCDPRSimulation:
             self.save_summary(trajectory_dir, trajectory_name)
         except Exception as e:
             print(f"Error saving summary: {e}")
+            
+        
         
         print(f"Results saved to: {trajectory_dir}")
     
@@ -341,7 +371,7 @@ class HeadlessCDPRSimulation:
 
 def main():
     # Path to your XML file
-    xml_path = "mujoco/cdpr.xml"
+    xml_path = "cdpr.xml"
     
     # Check if XML file exists
     if not os.path.exists(xml_path):
@@ -350,7 +380,7 @@ def main():
         return
     
     # Create simulation with rendering enabled
-    sim = HeadlessCDPRSimulation(xml_path, output_dir="trajectory_results", render=False)
+    sim = HeadlessCDPRSimulation(xml_path, output_dir="trajectory_results", render=True)
     
     try:
         sim.initialize()

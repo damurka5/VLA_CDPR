@@ -1,0 +1,9 @@
+CDPR Trajectory Summary
+=======================
+Trajectory: simple_test
+Timestamp: 2025-09-29 13:26:45
+Rendering enabled: False
+Simulation steps: 723
+Simulation time: 1.45 seconds
+Final EE position: [-0.01460979  0.00519884  1.14742768]
+Final target position: [0.    0.    1.309]

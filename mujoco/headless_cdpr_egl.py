@@ -97,35 +97,45 @@ class HeadlessCDPRSimulation:
         # Camera setup
         self.overview_cam = mj.MjvCamera()
         self.ee_cam = mj.MjvCamera()
-        
+
         # Configure overview camera
         self.overview_cam.type = mj.mjtCamera.mjCAMERA_FREE
         self.overview_cam.distance = 5.0
         self.overview_cam.azimuth = 45
         self.overview_cam.elevation = -30
-        
+
         # Configure end-effector camera
         self.ee_cam.type = mj.mjtCamera.mjCAMERA_FIXED
-        self.ee_cam.fixedcamid = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_CAMERA, "ee_camera")
-        
+        self.ee_cam.fixedcamid = mj.mj_name2id(
+            self.model, mj.mjtObj.mjOBJ_CAMERA, "ee_camera"
+        )
+
         # Scene and options
         self.scene = mj.MjvScene(self.model, maxgeom=10000)
         self.opt = mj.MjvOption()
         mj.mjv_defaultOption(self.opt)
-        
+
         # Offscreen buffer dimensions
         self.offwidth, self.offheight = 640, 480
         self.offviewport = mj.MjrRect(0, 0, self.offwidth, self.offheight)
-        
+
         if EGL_AVAILABLE:
-            # Use EGL for hardware-accelerated headless rendering
-            self.gl_context = GLContext(self.offwidth, self.offheight)
+            # ✅ Create EGL context first
+            self.gl_context = GLContext(max_width=self.offwidth, max_height=self.offheight)
+            self.gl_context.make_current()
+
+            # Now create MuJoCo rendering context
             self.context = mj.MjrContext(self.model, mj.mjtFontScale.mjFONTSCALE_150.value)
             mj.mjr_setBuffer(mj.mjtFramebuffer.mjFB_OFFSCREEN, self.context)
+
+            print("Using EGL context for headless rendering")
         else:
-            # Fallback to software rendering
+            # Fallback to software rendering (OSMesa if installed)
             self.context = mj.MjrContext(self.model, mj.mjtFontScale.mjFONTSCALE_150.value)
             mj.mjr_setBuffer(mj.mjtFramebuffer.mjFB_OFFSCREEN, self.context)
+
+            print("Using software rendering (no EGL)")
+
         
     def capture_frame(self, camera, camera_name):
         """Capture a frame from specified camera"""
@@ -359,7 +369,7 @@ class HeadlessCDPRSimulation:
 
 def main():
     # Path to your XML file
-    xml_path = "mujoco/cdpr.xml"
+    xml_path = "cdpr.xml"
     
     # Check if XML file exists
     if not os.path.exists(xml_path):
