@@ -24,6 +24,11 @@ class HeadlessCDPRController:
         self.prev_lengths = np.zeros(4)
         self.dt = 1.0/60.0
         
+    # if pos is provided, it calculates 
+    # cable lengths from frame points to a provided position
+    
+    # if pos is not provided, it calculates 
+    # cable lengths from frame points to a current end effector position
     def inverse_kinematics(self, pos=None):
         if pos is None:
             pos = self.pos
@@ -37,6 +42,8 @@ class HeadlessCDPRController:
     def update_position(self, new_pos):
         self.pos = new_pos.copy()
     
+    # old version controled via force-control
+    # new version controls via position control and uses kp, kv values from .xml file
     def compute_control(self, target_pos, current_ee_pos):
         self.update_position(current_ee_pos)
         cur_lengths = self.inverse_kinematics()
@@ -45,10 +52,12 @@ class HeadlessCDPRController:
         length_errors = target_lengths - cur_lengths
         cable_velocities = (cur_lengths - self.prev_lengths) / self.dt
         
-        control_signals = self.Kp * length_errors - self.Kd * cable_velocities
-        self.prev_lengths = cur_lengths.copy()
+        # control_signals = self.Kp * length_errors - self.Kd * cable_velocities
+        # self.prev_lengths = cur_lengths.copy()
         
-        return -control_signals
+        slider_positions = 0.9 - target_lengths # magic number from initial lengths of cables
+        
+        return slider_positions
 
 class HeadlessCDPRSimulation:
     def __init__(self, xml_path, output_dir="trajectory_videos"):
@@ -82,6 +91,7 @@ class HeadlessCDPRSimulation:
         # Load model
         self.model = mj.MjModel.from_xml_path(self.xml_path)
         self.data = mj.MjData(self.model)
+        self.model.opt.timestep = self.controller.dt
         
         # Initialize offscreen rendering
         self._setup_offscreen_rendering()
@@ -170,7 +180,8 @@ class HeadlessCDPRSimulation:
         if all(-1.309 <= coord <= 1.309 for coord in target_pos):
             self.target_pos = np.array(target_pos)
             ee_pos = self.get_end_effector_position()
-            cur_lengths = self.controller.inverse_kinematics(ee_pos)
+            # cur_lengths = self.controller.inverse_kinematics(ee_pos)
+            cur_lengths = self.controller.inverse_kinematics()
             self.controller.prev_lengths = cur_lengths.copy()
             return True
         return False
@@ -178,10 +189,11 @@ class HeadlessCDPRSimulation:
     def check_success(self):
         """Check if end-effector reached target"""
         ee_pos = self.get_end_effector_position()
-        cur_lengths = self.controller.inverse_kinematics(ee_pos)
-        target_lengths = self.controller.inverse_kinematics(self.target_pos)
-        length_errors = np.abs(target_lengths - cur_lengths)
-        return np.all(length_errors < self.controller.threshold)
+        # cur_lengths = self.controller.inverse_kinematics(ee_pos)
+        # target_lengths = self.controller.inverse_kinematics(self.target_pos)
+        # length_errors = np.abs(target_lengths - cur_lengths)
+        error = np.abs(ee_pos - self.target_pos)
+        return np.all(np.linalg.norm(error) < self.controller.threshold)
     
     def record_trajectory_step(self):
         """Record current state for trajectory data"""
@@ -204,7 +216,7 @@ class HeadlessCDPRSimulation:
         
         # Compute and apply control
         control_signals = self.controller.compute_control(self.target_pos, ee_pos)
-        for j in range(min(4, len(self.data.ctrl))):
+        for j in range(4):
             self.data.ctrl[j] = control_signals[j]
         
         # Step simulation
@@ -386,17 +398,16 @@ def main():
         # Define trajectory waypoints
         trajectories = {
             "simple_test": [
-                [0.3, 0.3, 1.2],
-                [-0.3, -0.3, 1.2],
-                [0.0, 0.0, 1.309]
+                np.array([0.5, 0.5, 0.5]),
+                np.array([0, 0, 0.1])
             ],
-            "square_trajectory": [
-                [0.5, 0.5, 1.0],
-                [0.5, -0.5, 1.0],
-                [-0.5, -0.5, 1.0],
-                [-0.5, 0.5, 1.0],
-                [0.0, 0.0, 1.309]
-            ]
+            # "square_trajectory": [
+            #     [0.5, 0.5, 1.0],
+            #     [0.5, -0.5, 1.0],
+            #     [-0.5, -0.5, 1.0],
+            #     [-0.5, 0.5, 1.0],
+            #     [0.0, 0.0, 1.309]
+            # ]
         }
         
         # Run each trajectory
