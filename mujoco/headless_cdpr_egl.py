@@ -110,9 +110,9 @@ class HeadlessCDPRSimulation:
 
         # Configure overview camera
         self.overview_cam.type = mj.mjtCamera.mjCAMERA_FREE
-        self.overview_cam.distance = 5.0
-        self.overview_cam.azimuth = 45
-        self.overview_cam.elevation = -30
+        self.overview_cam.distance = 3.0
+        self.overview_cam.azimuth = 0
+        self.overview_cam.elevation = -25
 
         # Configure end-effector camera
         self.ee_cam.type = mj.mjtCamera.mjCAMERA_FIXED
