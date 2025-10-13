@@ -109,7 +109,35 @@
         <camera name="ee_camera" mode="fixed" fovy="60"/>
     </body>
     </body>
+    
+    <!-- Mount at your end-effector body -->
+    <body name="ee_platform" pos="0 0 1.309">
+      <!-- Yaw DOF for the tool -->
+      <joint name="ee_yaw" type="hinge" axis="0 0 1" limited="true" range="-3.1416 3.1416" damping="0.1"/>
+
+      <body name="tool" pos="0 0 0.0">
+        <geom name="tool_base" type="box" size=".03 .03 .02" rgba="0.25 0.25 0.25 1"/>
+
+        <!-- Left finger -->
+        <body name="finger_left" pos="0.02 0 0">
+          <joint name="finger_l" type="slide" axis="1 0 0" limited="true" range="0 .03" damping="1.0"/>
+          <geom name="finger_l_geom" type="box" size=".01 .005 .02" rgba="0.8 0.1 0.1 1"/>
+        </body>
+
+        <!-- Right finger -->
+        <body name="finger_right" pos="-0.02 0 0">
+          <joint name="finger_r" type="slide" axis="-1 0 0" limited="true" range="0 .03" damping="1.0"/>
+          <geom name="finger_r_geom" type="box" size=".01 .005 .02" rgba="0.8 0.1 0.1 1"/>
+        </body>
+      </body>
+    </body>
+
   </worldbody>
+
+  <equality>
+    <!-- Enforce q_r = q_l  (10 poly coefficients: a0..a9). q2 = a0 + a1*q1 + ... -->
+    <joint joint1="finger_l" joint2="finger_r" polycoef="0 1 0 0 0"/>
+  </equality>
 
   <tendon>
     <spatial name="rope_1" limited="true" range="0 4.235" stiffness="0" damping="0" >
@@ -155,6 +183,16 @@
     <position name="slider_3_pos" joint="slider_3" ctrlrange="-4.5 4.5" kp="200" kv="80"/>
     <position name="slider_4_pos" joint="slider_4" ctrlrange="-4.5 4.5" kp="200" kv="80"/>
   </actuator>
+
+  <actuator>
+    <!-- existing 4 cable/slider actuators … -->
+
+    <!-- Tool yaw and gripper actuators -->
+    <position name="act_ee_yaw" joint="ee_yaw" kp="20" ctrlrange="-3.1416 3.1416"/>
+    <!-- Drive only left finger; right finger follows via equality -->
+    <position name="act_gripper" joint="finger_l" kp="200" ctrlrange="0 .03"/>
+  </actuator>
+
 
   <sensor>
     <framepos objtype="camera" objname="ee_camera"/>
