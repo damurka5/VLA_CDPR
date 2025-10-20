@@ -34,7 +34,7 @@ conda activate mujoco_offscreen
 export CUDA_VISIBLE_DEVICES=0
 ```
 
-don't forget to `conda install -c conda-forge libegl-devel`
+don't forget to `conda install -c conda-forge libegl-devel` and `conda install -c conda-forge gcc`
 
 ### 1.2 Start the OpenVLA server
 

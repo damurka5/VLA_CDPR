@@ -14,49 +14,50 @@ except ImportError:
     EGL_AVAILABLE = False
     print("EGL not available, falling back to software rendering")
 
+import os
+import mujoco as mj
+import numpy as np
+import cv2
+import time
+from datetime import datetime
+import imageio
+
+# Try to import EGL for true headless rendering
+try:
+    from mujoco.egl import GLContext
+    EGL_AVAILABLE = True
+except ImportError:
+    EGL_AVAILABLE = False
+    print("EGL not available, falling back to software rendering")
+
+def _id(model, objtype, name):
+    return mj.mj_name2id(model, objtype, name)
+
 class HeadlessCDPRController:
     def __init__(self, frame_points, initial_pos=np.array([0, 0, 1.309])):
         self.frame_points = frame_points
-        self.pos = initial_pos
+        self.pos = initial_pos.astype(float)
         self.Kp = 100
         self.Kd = 130
         self.threshold = 0.03
         self.prev_lengths = np.zeros(4)
         self.dt = 1.0/60.0
-        
-    # if pos is provided, it calculates 
-    # cable lengths from frame points to a provided position
-    
-    # if pos is not provided, it calculates 
-    # cable lengths from frame points to a current end effector position
+
     def inverse_kinematics(self, pos=None):
         if pos is None:
             pos = self.pos
-            
-        lengths = []
-        for i in range(4):
-            vec = pos - self.frame_points[i]
-            lengths.append(np.linalg.norm(vec))
-        return np.array(lengths)
-    
+        diffs = pos[None, :] - self.frame_points
+        return np.linalg.norm(diffs, axis=1)
+
     def update_position(self, new_pos):
         self.pos = new_pos.copy()
-    
-    # old version controled via force-control
-    # new version controls via position control and uses kp, kv values from .xml file
+
     def compute_control(self, target_pos, current_ee_pos):
         self.update_position(current_ee_pos)
         cur_lengths = self.inverse_kinematics()
         target_lengths = self.inverse_kinematics(target_pos)
-        
-        length_errors = target_lengths - cur_lengths
-        cable_velocities = (cur_lengths - self.prev_lengths) / self.dt
-        
-        # control_signals = self.Kp * length_errors - self.Kd * cable_velocities
-        # self.prev_lengths = cur_lengths.copy()
-        
-        slider_positions = 0.9 - target_lengths # magic number from initial lengths of cables
-        
+        # Map target cable lengths -> slider targets via a fixed offset
+        slider_positions = 0.9 - target_lengths  # preserves your original "magic number"
         return slider_positions
 
 class HeadlessCDPRSimulation:
@@ -66,222 +67,191 @@ class HeadlessCDPRSimulation:
         self.model = None
         self.data = None
         self.gl_context = None
-        
-        # CDPR parameters
+
+        # CDPR frame anchor points (must match XML)
         self.frame_points = np.array([
             [-0.535, -0.755, 1.309],
             [0.755, -0.525, 1.309],
-            [0.535, 0.755, 1.309],
-            [-0.755, 0.525, 1.309]
-        ])
-        
+            [0.535,  0.755, 1.309],
+            [-0.755, 0.525, 1.309],
+        ], dtype=float)
+
         self.controller = HeadlessCDPRController(self.frame_points)
-        self.target_pos = np.array([0, 0, 1.309])
-        
-        # Video recording
+        self.target_pos = np.array([0, 0, 1.309], dtype=float)
+
+        # Recording
         self.overview_frames = []
         self.ee_camera_frames = []
         self.trajectory_data = []
-        
-        # Create output directory
+
         os.makedirs(output_dir, exist_ok=True)
-        
+
     def initialize(self):
-        """Initialize MuJoCo simulation with EGL for headless rendering"""
-        # Load model
         self.model = mj.MjModel.from_xml_path(self.xml_path)
         self.data = mj.MjData(self.model)
         self.model.opt.timestep = self.controller.dt
-        
-        # Initialize offscreen rendering
+
+        # Resolve body and actuator indices by name (robust against XML order)
+        self.body_box = _id(self.model, mj.mjtObj.mjOBJ_BODY, "box")
+        self.cam_id   = _id(self.model, mj.mjtObj.mjOBJ_CAMERA, "ee_camera")
+
+        # Actuators: sliders, yaw, gripper
+        self.act_sliders = [
+            _id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "slider_1_pos"),
+            _id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "slider_2_pos"),
+            _id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "slider_3_pos"),
+            _id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "slider_4_pos"),
+        ]
+        self.act_yaw     = _id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "act_ee_yaw")
+        self.act_gripper = _id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "act_gripper")
+
         self._setup_offscreen_rendering()
-        
-        # Initialize simulation
         mj.mj_forward(self.model, self.data)
-        
+
         print("Headless CDPR Simulation initialized successfully!")
         print(f"Using {'EGL' if EGL_AVAILABLE else 'software'} rendering")
-        
+
     def _setup_offscreen_rendering(self):
-        """Setup offscreen rendering context"""
-        # Camera setup
         self.overview_cam = mj.MjvCamera()
         self.ee_cam = mj.MjvCamera()
 
-        # Configure overview camera
         self.overview_cam.type = mj.mjtCamera.mjCAMERA_FREE
         self.overview_cam.distance = 3.0
         self.overview_cam.azimuth = 0
         self.overview_cam.elevation = -25
 
-        # Configure end-effector camera
         self.ee_cam.type = mj.mjtCamera.mjCAMERA_FIXED
-        self.ee_cam.fixedcamid = mj.mj_name2id(
-            self.model, mj.mjtObj.mjOBJ_CAMERA, "ee_camera"
-        )
+        self.ee_cam.fixedcamid = self.cam_id
 
-        # Scene and options
         self.scene = mj.MjvScene(self.model, maxgeom=10000)
         self.opt = mj.MjvOption()
         mj.mjv_defaultOption(self.opt)
 
-        # Offscreen buffer dimensions
         self.offwidth, self.offheight = 640, 480
         self.offviewport = mj.MjrRect(0, 0, self.offwidth, self.offheight)
 
         if EGL_AVAILABLE:
-            # ✅ Create EGL context first
             self.gl_context = GLContext(max_width=self.offwidth, max_height=self.offheight)
             self.gl_context.make_current()
+        self.context = mj.MjrContext(self.model, mj.mjtFontScale.mjFONTSCALE_150.value)
+        mj.mjr_setBuffer(mj.mjtFramebuffer.mjFB_OFFSCREEN, self.context)
 
-            # Now create MuJoCo rendering context
-            self.context = mj.MjrContext(self.model, mj.mjtFontScale.mjFONTSCALE_150.value)
-            mj.mjr_setBuffer(mj.mjtFramebuffer.mjFB_OFFSCREEN, self.context)
-
-            print("Using EGL context for headless rendering")
-        else:
-            # Fallback to software rendering (OSMesa if installed)
-            self.context = mj.MjrContext(self.model, mj.mjtFontScale.mjFONTSCALE_150.value)
-            mj.mjr_setBuffer(mj.mjtFramebuffer.mjFB_OFFSCREEN, self.context)
-
-            print("Using software rendering (no EGL)")
-
-        
     def capture_frame(self, camera, camera_name):
-        """Capture a frame from specified camera"""
         try:
-            # Update scene
-            mj.mjv_updateScene(self.model, self.data, self.opt, None, camera, 
-                              mj.mjtCatBit.mjCAT_ALL.value, self.scene)
-            
-            # Render to offscreen buffer
+            mj.mjv_updateScene(self.model, self.data, self.opt, None, camera,
+                               mj.mjtCatBit.mjCAT_ALL.value, self.scene)
             mj.mjr_render(self.offviewport, self.scene, self.context)
-            
-            # Read pixels
-            rgb_buffer = np.zeros((self.offheight, self.offwidth, 3), dtype=np.uint8)
-            depth_buffer = np.zeros((self.offheight, self.offwidth), dtype=np.float32)
-            mj.mjr_readPixels(rgb_buffer, depth_buffer, self.offviewport, self.context)
-            
-            # Process image
-            rgb_buffer = np.flipud(rgb_buffer)
-            return rgb_buffer
-            
+            rgb = np.zeros((self.offheight, self.offwidth, 3), dtype=np.uint8)
+            depth = np.zeros((self.offheight, self.offwidth), dtype=np.float32)
+            mj.mjr_readPixels(rgb, depth, self.offviewport, self.context)
+            return np.flipud(rgb)
         except Exception as e:
             print(f"Error capturing frame from {camera_name}: {e}")
-            # Return a blank frame if rendering fails
             return np.zeros((self.offheight, self.offwidth, 3), dtype=np.uint8)
-    
+
     def get_end_effector_position(self):
-        """Get current end-effector position"""
-        return self.data.qpos[4:7].copy()
-    
+        # ✅ world position of body "box" (robust to joint ordering)
+        return self.data.xpos[self.body_box].copy()
+
     def set_target_position(self, target_pos):
-        """Set new target position"""
-        if all(-1.309 <= coord <= 1.309 for coord in target_pos):
-            self.target_pos = np.array(target_pos)
+        target_pos = np.asarray(target_pos, dtype=float)
+        if np.all((-1.309 <= target_pos) & (target_pos <= 1.309)):
+            self.target_pos = target_pos
             ee_pos = self.get_end_effector_position()
-            # cur_lengths = self.controller.inverse_kinematics(ee_pos)
-            cur_lengths = self.controller.inverse_kinematics()
-            self.controller.prev_lengths = cur_lengths.copy()
+            self.controller.prev_lengths = self.controller.inverse_kinematics(ee_pos)
             return True
         return False
-    
+
     def check_success(self):
-        """Check if end-effector reached target"""
         ee_pos = self.get_end_effector_position()
-        # cur_lengths = self.controller.inverse_kinematics(ee_pos)
-        # target_lengths = self.controller.inverse_kinematics(self.target_pos)
-        # length_errors = np.abs(target_lengths - cur_lengths)
-        error = np.abs(ee_pos - self.target_pos)
-        return np.all(np.linalg.norm(error) < self.controller.threshold)
-    
+        return np.linalg.norm(ee_pos - self.target_pos) < self.controller.threshold
+
+    # === Gripper / yaw helpers ===
+    def set_gripper(self, opening_m):
+        """Set desired opening for left finger (right follows). Range [0, 0.03]."""
+        opening = float(np.clip(opening_m, 0.0, 0.03))
+        self.data.ctrl[self.act_gripper] = opening
+
+    def open_gripper(self):
+        self.set_gripper(0.03)
+
+    def close_gripper(self):
+        self.set_gripper(0.0)
+
+    def set_yaw(self, yaw_rad):
+        self.data.ctrl[self.act_yaw] = float(np.clip(yaw_rad, -np.pi, np.pi))
+
     def record_trajectory_step(self):
-        """Record current state for trajectory data"""
         ee_pos = self.get_end_effector_position()
-        slider_positions = [self.data.qpos[i] for i in range(4)]
+        slider_q = [self.data.qpos[j] for j in range(4)]  # fine for logging
         cable_lengths = self.controller.inverse_kinematics(ee_pos)
-        
         self.trajectory_data.append({
             'timestamp': self.data.time,
             'ee_position': ee_pos.copy(),
             'target_position': self.target_pos.copy(),
-            'slider_positions': slider_positions.copy(),
+            'slider_positions': slider_q.copy(),
             'cable_lengths': cable_lengths.copy(),
-            'control_signals': self.data.ctrl.copy() if len(self.data.ctrl) > 0 else [0, 0, 0, 0]
+            'control_signals': self.data.ctrl.copy() if self.model.nu > 0 else np.zeros(0),
         })
-    
+
     def run_simulation_step(self, capture_frame=True):
-        """Run one simulation step"""
         ee_pos = self.get_end_effector_position()
-        
-        # Compute and apply control
         control_signals = self.controller.compute_control(self.target_pos, ee_pos)
-        for j in range(4):
-            self.data.ctrl[j] = control_signals[j]
-        
-        # Step simulation
+        # Apply slider targets by actuator index
+        for j, act_id in enumerate(self.act_sliders):
+            self.data.ctrl[act_id] = control_signals[j]
+
         mj.mj_step(self.model, self.data)
-        
-        # Capture frames if requested
+
         if capture_frame:
-            overview_frame = self.capture_frame(self.overview_cam, "overview")
-            ee_frame = self.capture_frame(self.ee_cam, "ee_camera")
-            
-            self.overview_frames.append(overview_frame)
-            self.ee_camera_frames.append(ee_frame)
-        
-        # Record trajectory data
+            self.overview_frames.append(self.capture_frame(self.overview_cam, "overview"))
+            self.ee_camera_frames.append(self.capture_frame(self.ee_cam, "ee_camera"))
+
         self.record_trajectory_step()
-    
-    def run_trajectory(self, target_positions, trajectory_name="trajectory", 
-                      max_steps_per_target=600, capture_every_n=3):
-        """Run a complete trajectory through multiple target positions"""
+
+    def run_trajectory(self, target_positions, trajectory_name="trajectory",
+                       max_steps_per_target=600, capture_every_n=3):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         trajectory_dir = os.path.join(self.output_dir, f"{trajectory_name}_{timestamp}")
         os.makedirs(trajectory_dir, exist_ok=True)
-        
         print(f"Starting trajectory: {trajectory_name}")
-        
-        # Reset recording
-        self.overview_frames = []
-        self.ee_camera_frames = []
-        self.trajectory_data = []
-        
+
+        self.overview_frames, self.ee_camera_frames, self.trajectory_data = [], [], []
         total_steps = 0
         trajectory_success = True
-        
+
+        # Demo: open before motion
+        self.open_gripper()
         for i, target_pos in enumerate(target_positions):
             print(f"Moving to target {i+1}/{len(target_positions)}: {target_pos}")
-            
             if not self.set_target_position(target_pos):
                 print(f"Invalid target position: {target_pos}")
                 trajectory_success = False
                 break
-            
-            # Run until target reached or timeout
+
             steps_for_target = 0
             target_reached = False
-            
             while steps_for_target < max_steps_per_target:
-                # Run simulation step (capture frames periodically)
-                capture_this_frame = (total_steps % capture_every_n == 0)
-                self.run_simulation_step(capture_frame=capture_this_frame)
-                
+                capture = (total_steps % capture_every_n == 0)
+                self.run_simulation_step(capture_frame=capture)
                 total_steps += 1
                 steps_for_target += 1
-                
-                # Check if target reached
+
                 if self.check_success():
                     print(f"Target {i+1} reached in {steps_for_target} steps")
                     target_reached = True
                     break
-            
+
             if not target_reached:
                 print(f"Timeout reaching target {i+1} after {max_steps_per_target} steps")
                 trajectory_success = False
-                # Continue to next target anyway
-        
-        # Save results
+
+        # Demo: close after motion
+        self.close_gripper()
+        # step a little to see closing motion in video
+        for _ in range(20):
+            self.run_simulation_step(capture_frame=True)
+
         self.save_trajectory_results(trajectory_dir, trajectory_name)
         return trajectory_success
     
