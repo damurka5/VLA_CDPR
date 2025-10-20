@@ -98,7 +98,7 @@
     <body name="gripper" pos="0 0 1.309">
       <!-- free base moved by cables -->
       <freejoint/>
-      <inertial pos="0 0 0" mass="1.2" diaginertia="0.02 0.02 0.02"/>
+      <inertial pos="0 0 0" mass="1.2" diaginertia="1.02 1.02 1.02"/>
 
       <!-- Attach tendons here (keep same site name used by your tendons) -->
       <site name="topcenter" pos="0 0 0.08" size="0.006" rgba="0 0 1 1"/>
