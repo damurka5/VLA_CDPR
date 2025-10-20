@@ -1,0 +1,9 @@
+CDPR Trajectory Summary
+=======================
+Trajectory: grasp_demo
+Timestamp: 2025-10-20 16:21:11
+Total frames captured: 470
+Total simulation steps: 960
+Simulation time: 16.00 seconds
+Final EE position: [0.45323017 0.45496581 0.27252719]
+Final target position: [0.5  0.5  0.35]

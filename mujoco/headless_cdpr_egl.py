@@ -90,6 +90,9 @@ class HeadlessCDPRSimulation:
         self.model = mj.MjModel.from_xml_path(self.xml_path)
         self.data = mj.MjData(self.model)
         self.model.opt.timestep = self.controller.dt
+        
+        self.jnt_yaw = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_JOINT, "ee_yaw")
+        self.jnt_yaw_qadr = self.model.jnt_qposadr[self.jnt_yaw]  # index into qpos for yaw angle
 
         # IDs we’ll need
         self.body_ee   = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_BODY, "ee_base")  # EE body
@@ -245,6 +248,35 @@ class HeadlessCDPRSimulation:
     def lifted_enough(self, z_start, min_rise=0.02):
         z_now = self.get_target_position()[2]
         return (z_now - z_start) >= min_rise
+    
+    def _angle_wrap(self, a):
+        """Wrap angle to [-pi, pi]."""
+        return (a + np.pi) % (2*np.pi) - np.pi
+
+    def rotate_to(self, yaw_target, duration=1.0, hold_xyz=None, capture_every_n=2):
+        """
+        Smoothly rotate yaw to yaw_target [rad] over 'duration' seconds.
+        If hold_xyz is provided, we keep position controller targeting that XYZ while rotating.
+        """
+        dt = float(self.controller.dt)
+        steps = max(1, int(round(duration / dt)))
+
+        # Read current yaw directly from joint qpos
+        yaw_now = float(self.data.qpos[self.jnt_yaw_qadr])
+        # shortest arc
+        dyaw = self._angle_wrap(yaw_target - yaw_now)
+
+        # Fix the translational target if requested
+        if hold_xyz is not None:
+            self.set_target_position(np.asarray(hold_xyz, dtype=float))
+
+        for k in range(steps):
+            alpha = (k + 1) / steps
+            yaw_cmd = yaw_now + dyaw * alpha
+            self.set_yaw(yaw_cmd)
+            capture = (k % capture_every_n == 0)
+            self.run_simulation_step(capture_frame=capture)
+
 
     def run_simulation_step(self, capture_frame=True):
         ee_pos = self.get_end_effector_position()
@@ -308,52 +340,67 @@ class HeadlessCDPRSimulation:
         return trajectory_success
     
     def run_grasp_demo(self, object_xy=(0.5, 0.5), hover_z=0.35, grasp_z=0.06,
-                    lift_z=0.35, yaw=0.0, name="grasp_demo"):
+                   lift_z=0.35, yaw=0.0, name="grasp_demo"):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         trajectory_dir = os.path.join(self.output_dir, f"{name}_{timestamp}")
         os.makedirs(trajectory_dir, exist_ok=True)
         self.overview_frames, self.ee_camera_frames, self.trajectory_data = [], [], []
 
         ox, oy = object_xy
-        self.set_yaw(yaw)          # optional: align jaws with block
-        self.open_gripper()        # start open
+        hold_hover = np.array([ox, oy, hover_z], dtype=float)
 
+        # Start open, move above object
+        self.open_gripper()
         print("➡️  Move above object (hover).")
-        ok, _ = self.goto([ox, oy, hover_z], max_steps=120);  print("  done" if ok else "  timeout")
+        ok, _ = self.goto(hold_hover, max_steps=120);  print("  done" if ok else "  timeout")
 
+        # --- YAW TEST 1: rotate to the requested yaw while hovering ---
+        print(f"🔁  Yaw to {yaw:.2f} rad while hovering.")
+        self.rotate_to(yaw_target=float(2*yaw), duration=2.5, hold_xyz=hold_hover)
+
+        # Descend to grasp height (keep that yaw)
         print("➡️  Descend to grasp height.")
         ok, _ = self.goto([ox, oy, grasp_z], max_steps=120);  print("  done" if ok else "  timeout")
 
-        # Let things settle a bit
         for _ in range(20): self.run_simulation_step(capture_frame=True)
 
+        # Close & squeeze
         print("➡️  Close gripper.")
         self.close_gripper()
-        for _ in range(40): self.run_simulation_step(capture_frame=True)  # let fingers squeeze
+        for _ in range(40): self.run_simulation_step(capture_frame=True)
 
         z_before = self.get_target_position()[2]
 
+        # Lift up
         print("➡️  Lift.")
         ok, _ = self.goto([ox, oy, lift_z], max_steps=150);  print("  done" if ok else "  timeout")
-        
-        print("➡️  Move above object again.")
-        ok, _ = self.goto([ox, oy, hover_z], max_steps=120);  print("  done" if ok else "  timeout")
+
+        # --- YAW TEST 2: rotate 90° while lifted (tests stability while carrying) ---
+        yaw2 = float(self._angle_wrap(yaw + np.pi/2.0))
+        print(f"🔁  Yaw to {yaw2:.2f} rad while lifted.")
+        self.rotate_to(yaw_target=-yaw2, duration=2.5, hold_xyz=[ox, oy, lift_z])
+
+        # Optional: yaw back to original
+        print(f"🔁  Yaw back to {yaw:.2f} rad.")
+        # self.rotate_to(yaw_target=float(yaw), duration=1.0, hold_xyz=[ox, oy, lift_z])
+
+        # Return to hover, open/close a couple times (exercise fingers under new yaw)
+        print("➡️  Move above object again (hover).")
+        ok, _ = self.goto(hold_hover, max_steps=120);  print("  done" if ok else "  timeout")
 
         self.open_gripper()
-        for _ in range(40): self.run_simulation_step(capture_frame=True)  # let fingers squeeze
+        for _ in range(30): self.run_simulation_step(capture_frame=True)
         self.close_gripper()
-        for _ in range(40): self.run_simulation_step(capture_frame=True)  # let fingers squeeze
-        
-        # settle & check
+        for _ in range(30): self.run_simulation_step(capture_frame=True)
+
+        # Check grasp success
         for _ in range(30): self.run_simulation_step(capture_frame=True)
         grasp_ok = self.lifted_enough(z_before, min_rise=0.02) or self.has_finger_contact()
 
-        # Save as usual
         self.save_trajectory_results(trajectory_dir, name)
         print(f"✅ Grasp {'SUCCEEDED' if grasp_ok else 'FAILED'}")
         return grasp_ok
 
-    
     def save_trajectory_results(self, trajectory_dir, trajectory_name):
         """Save all trajectory data and videos"""
         print("Saving trajectory results...")
