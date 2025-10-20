@@ -89,59 +89,67 @@
     <geom name="floor" type="plane" size="5 5 0.1" pos="0 0 -0.1" rgba="0.8 0.8 0.8 1"/>
     
     <!-- Red square object on floor -->
-    <body name="target_object" pos="0.5 0.5 0">
+    <!--<body name="target_object" pos="0.5 0.5 0">
       <geom type="box" size="0.1 0.1 0.01" rgba="1 0 0 1"/>
+    </body> -->
+
+    <!-- Red block you can actually pick up -->
+    <body name="target_object" pos="0.5 0.5 0">
+      <inertial pos="0 0 0" mass="0.25" diaginertia="0.0003 0.0003 0.0003"/>
+      <geom name="target_box" type="box" size="0.1 0.1 0.01"
+            rgba="1 0 0 1"
+            friction="1.2 0.01 0.0001" condim="4"/>
     </body>
+
 
     <!-- End-effector -->
-        <!-- ===== Cable-suspended GRIPPER as the end-effector ===== -->
-    <body name="gripper" pos="0 0 1.309">
-      <!-- free base moved by cables -->
-      <freejoint/>
-      <inertial pos="0 0 0" mass="1.2" diaginertia="1.02 1.02 1.02"/>
-
-      <!-- Attach tendons here (keep same site name used by your tendons) -->
+    <!-- base (already had inertial) -->
+    <body name="ee_base" pos="0 0 1.309">
+      <joint name="ee_free" type="free" damping="3" armature="0.002"/>
+      <inertial pos="0 0 0" mass="1.2" diaginertia="0.02 0.02 0.02"/>
       <site name="topcenter" pos="0 0 0.08" size="0.006" rgba="0 0 1 1"/>
 
-      <!-- (optional) helper sites if you ever need them -->
-      <!-- <site name="grip_ref" pos="0 0 -0.05" size="0.006" rgba="0 1 0 1"/> -->
+      <!-- ===== Orientation stabilizer ===== -->
+      <body name="ee_stab" pos="0 0 0">
+        <!-- ✅ give mass/inertia to this ball-jointed body -->
+        <inertial pos="0 0 0" mass="0.6" diaginertia="0.005 0.005 0.005"/>
+        <joint name="ee_ball" type="ball" damping="6" stiffness="80" armature="0.02" limited="false"/>
 
-      <!-- EE camera mounted on the gripper looking down -->
-      <body name="camera_body" pos="0 0 -0.10">
-        <camera name="ee_camera" mode="fixed" fovy="60"/>
-      </body>
-
-      <!-- ===== bigger, visible parallel-jaw gripper ===== -->
-      <body name="ee_platform" pos="0 0 0.08">
-        <!-- optional tool yaw -->
-        <joint name="ee_yaw" type="hinge" axis="0 0 1" limited="true"
-               range="-3.1416 3.1416" damping="0.2"/>
-
-        <!-- Palm/base -->
-        <geom name="palm" type="box" size="0.03 0.03 0.015"
-              rgba="0.30 0.30 0.30 1" contype="1" conaffinity="1"/>
-
-        <!-- Left finger carriage -->
-        <body name="finger_left_car" pos="0.035 0 0">
-          <joint name="finger_l" type="slide" axis="1 0 0" limited="true"
-                 range="0 0.06" damping="2.0"/>
-          <geom name="finger_l_link" type="box" size="0.012 0.01 0.055" pos="0 0 -0.055"
-                rgba="0.9 0.15 0.15 1" contype="1" conaffinity="1" friction="1.0 0.01 0.01"/>
-          <geom name="finger_l_tip" type="capsule" fromto="0 0 -0.11  0 0 -0.135" size="0.008"
-                rgba="0.9 0.15 0.15 1" contype="1" conaffinity="1" friction="1.0 0.01 0.01"/>
+        <body name="camera_body" pos="0 0 -0.10">
+          <camera name="ee_camera" mode="fixed" fovy="60"/>
         </body>
 
-        <!-- Right finger (mirrored) -->
-        <body name="finger_right_car" pos="-0.035 0 0">
-          <joint name="finger_r" type="slide" axis="-1 0 0" limited="true"
-                 range="0 0.06" damping="2.0"/>
-          <geom name="finger_r_link" type="box" size="0.012 0.01 0.055" pos="0 0 -0.055"
-                rgba="0.9 0.15 0.15 1" contype="1" conaffinity="1" friction="1.0 0.01 0.01"/>
-          <geom name="finger_r_tip" type="capsule" fromto="0 0 -0.11  0 0 -0.135" size="0.008"
-                rgba="0.9 0.15 0.15 1" contype="1" conaffinity="1" friction="1.0 0.01 0.01"/>
+        <body name="ee_platform" pos="0 0 0.08">
+          <!-- ✅ mass/inertia for yaw body -->
+          <inertial pos="0 0 0" mass="0.35" diaginertia="0.003 0.003 0.003"/>
+          <joint name="ee_yaw" type="hinge" axis="0 0 1" limited="true" range="-3.1416 3.1416" damping="0.3"/>
+
+          <geom name="palm" type="box" size="0.03 0.03 0.015"
+                rgba="0.30 0.30 0.30 1" contype="1" conaffinity="1"/>
+
+          <body name="finger_left_car" pos="0.035 0 0">
+            <!-- ✅ mass/inertia for left finger carriage (has slide joint) -->
+            <inertial pos="0 0 0" mass="0.08" diaginertia="0.0002 0.0002 0.00015"/>
+            <joint name="finger_l" type="slide" axis="1 0 0" limited="true" range="0 0.06" damping="3.0"/>
+            <geom name="finger_l_link" type="box" size="0.012 0.01 0.055" pos="0 0 -0.055"
+                  rgba="0.9 0.15 0.15 1" contype="1" conaffinity="1" friction="1.5 0.02 0.01"/>
+            <geom name="finger_l_tip" type="capsule" fromto="0 0 -0.11  0 0 -0.135" size="0.008"
+                  rgba="0.9 0.15 0.15 1" contype="1" conaffinity="1" friction="1.5 0.02 0.01"/>
+          </body>
+
+          <body name="finger_right_car" pos="-0.035 0 0">
+            <!-- ✅ mass/inertia for right finger carriage -->
+            <inertial pos="0 0 0" mass="0.08" diaginertia="0.0002 0.0002 0.00015"/>
+            <joint name="finger_r" type="slide" axis="-1 0 0" limited="true" range="0 0.06" damping="3.0"/>
+            <geom name="finger_r_link" type="box" size="0.012 0.01 0.055" pos="0 0 -0.055"
+                  rgba="0.9 0.15 0.15 1" contype="1" conaffinity="1" friction="1.5 0.02 0.01"/>
+            <geom name="finger_r_tip" type="capsule" fromto="0 0 -0.11  0 0 -0.135" size="0.008"
+                  rgba="0.9 0.15 0.15 1" contype="1" conaffinity="1" friction="1.5 0.02 0.01"/>
+          </body>
         </body>
       </body>
     </body>
+
 
 
   </worldbody>

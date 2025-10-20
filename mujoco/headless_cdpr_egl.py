@@ -91,20 +91,29 @@ class HeadlessCDPRSimulation:
         self.data = mj.MjData(self.model)
         self.model.opt.timestep = self.controller.dt
 
-        # Resolve body and actuator indices by name (robust against XML order)
-        self.body_box = _id(self.model, mj.mjtObj.mjOBJ_BODY, "box")
-        self.cam_id   = _id(self.model, mj.mjtObj.mjOBJ_CAMERA, "ee_camera")
+        # IDs we’ll need
+        self.body_ee   = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_BODY, "ee_base")  # EE body
+        self.cam_id    = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_CAMERA, "ee_camera")
 
-        # Actuators: sliders, yaw, gripper
+        # Sliders (cables)
         self.act_sliders = [
-            _id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "slider_1_pos"),
-            _id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "slider_2_pos"),
-            _id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "slider_3_pos"),
-            _id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "slider_4_pos"),
+            mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "slider_1_pos"),
+            mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "slider_2_pos"),
+            mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "slider_3_pos"),
+            mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "slider_4_pos"),
         ]
-        self.act_yaw     = _id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "act_ee_yaw")
-        self.act_gripper = _id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "act_gripper")
+        # Tool actuators
+        self.act_yaw     = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "act_ee_yaw")
+        self.act_gripper = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "act_gripper")
 
+        # Target object (body + geom). If the geom is unnamed, we’ll find it by body.
+        self.body_target = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_BODY, "target_object")
+        try:
+            self.geom_target = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_GEOM, "target_box")
+        except Exception:
+            # Fallback: first geom belonging to target body
+            self.geom_target = int(np.where(self.model.geom_bodyid == self.body_target)[0][0])
+                
         self._setup_offscreen_rendering()
         mj.mj_forward(self.model, self.data)
 
@@ -150,9 +159,21 @@ class HeadlessCDPRSimulation:
             return np.zeros((self.offheight, self.offwidth, 3), dtype=np.uint8)
 
     def get_end_effector_position(self):
-        # ✅ world position of body "box" (robust to joint ordering)
-        return self.data.xpos[self.body_box].copy()
+        return self.data.xpos[self.body_ee].copy()
 
+    def get_target_position(self):
+        return self.data.xpos[self.body_target].copy()
+
+    def set_gripper(self, opening_m):
+        opening = float(np.clip(opening_m, 0.0, 0.06))  # your bigger range
+        self.data.ctrl[self.act_gripper] = opening
+
+    def open_gripper(self):  self.set_gripper(0.06)
+    def close_gripper(self): self.set_gripper(0.0)
+
+    def set_yaw(self, yaw_rad):
+        self.data.ctrl[self.act_yaw] = float(np.clip(yaw_rad, -np.pi, np.pi))
+    
     def set_target_position(self, target_pos):
         target_pos = np.asarray(target_pos, dtype=float)
         if np.all((-1.309 <= target_pos) & (target_pos <= 1.309)):
@@ -193,6 +214,37 @@ class HeadlessCDPRSimulation:
             'cable_lengths': cable_lengths.copy(),
             'control_signals': self.data.ctrl.copy() if self.model.nu > 0 else np.zeros(0),
         })
+        
+    def goto(self, world_xyz, max_steps=900, tol=0.03, capture_every_n=3):
+        """Drive EE to world_xyz with your cable controller."""
+        self.set_target_position(np.asarray(world_xyz, dtype=float))
+        steps, total = 0, 0
+        while steps < max_steps:
+            capture = (total % capture_every_n == 0)
+            self.run_simulation_step(capture_frame=capture)
+            total += 1; steps += 1
+            if np.linalg.norm(self.get_end_effector_position() - self.target_pos) < tol:
+                return True, steps
+        return False, steps
+
+    def has_finger_contact(self):
+        # any contact involving target geom and a finger geom
+        finger_geoms = [
+            mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_GEOM, "finger_l_link"),
+            mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_GEOM, "finger_r_link"),
+            mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_GEOM, "finger_l_tip"),
+            mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_GEOM, "finger_r_tip"),
+        ]
+        tgt = self.geom_target
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            if (c.geom1 == tgt and c.geom2 in finger_geoms) or (c.geom2 == tgt and c.geom1 in finger_geoms):
+                return True
+        return False
+
+    def lifted_enough(self, z_start, min_rise=0.02):
+        z_now = self.get_target_position()[2]
+        return (z_now - z_start) >= min_rise
 
     def run_simulation_step(self, capture_frame=True):
         ee_pos = self.get_end_effector_position()
@@ -254,6 +306,53 @@ class HeadlessCDPRSimulation:
 
         self.save_trajectory_results(trajectory_dir, trajectory_name)
         return trajectory_success
+    
+    def run_grasp_demo(self, object_xy=(0.5, 0.5), hover_z=0.35, grasp_z=0.06,
+                    lift_z=0.35, yaw=0.0, name="grasp_demo"):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        trajectory_dir = os.path.join(self.output_dir, f"{name}_{timestamp}")
+        os.makedirs(trajectory_dir, exist_ok=True)
+        self.overview_frames, self.ee_camera_frames, self.trajectory_data = [], [], []
+
+        ox, oy = object_xy
+        self.set_yaw(yaw)          # optional: align jaws with block
+        self.open_gripper()        # start open
+
+        print("➡️  Move above object (hover).")
+        ok, _ = self.goto([ox, oy, hover_z], max_steps=120);  print("  done" if ok else "  timeout")
+
+        print("➡️  Descend to grasp height.")
+        ok, _ = self.goto([ox, oy, grasp_z], max_steps=120);  print("  done" if ok else "  timeout")
+
+        # Let things settle a bit
+        for _ in range(20): self.run_simulation_step(capture_frame=True)
+
+        print("➡️  Close gripper.")
+        self.close_gripper()
+        for _ in range(40): self.run_simulation_step(capture_frame=True)  # let fingers squeeze
+
+        z_before = self.get_target_position()[2]
+
+        print("➡️  Lift.")
+        ok, _ = self.goto([ox, oy, lift_z], max_steps=150);  print("  done" if ok else "  timeout")
+        
+        print("➡️  Move above object again.")
+        ok, _ = self.goto([ox, oy, hover_z], max_steps=120);  print("  done" if ok else "  timeout")
+
+        self.open_gripper()
+        for _ in range(40): self.run_simulation_step(capture_frame=True)  # let fingers squeeze
+        self.close_gripper()
+        for _ in range(40): self.run_simulation_step(capture_frame=True)  # let fingers squeeze
+        
+        # settle & check
+        for _ in range(30): self.run_simulation_step(capture_frame=True)
+        grasp_ok = self.lifted_enough(z_before, min_rise=0.02) or self.has_finger_contact()
+
+        # Save as usual
+        self.save_trajectory_results(trajectory_dir, name)
+        print(f"✅ Grasp {'SUCCEEDED' if grasp_ok else 'FAILED'}")
+        return grasp_ok
+
     
     def save_trajectory_results(self, trajectory_dir, trajectory_name):
         """Save all trajectory data and videos"""
@@ -349,59 +448,79 @@ class HeadlessCDPRSimulation:
                 pass
         print("Simulation cleanup completed")
 
-def main():
-    # Path to your XML file
-    xml_path = "cdpr.xml"
+# def main():
+#     # Path to your XML file
+#     xml_path = "cdpr.xml"
     
-    # Check if XML file exists
+#     # Check if XML file exists
+#     if not os.path.exists(xml_path):
+#         print(f"Error: XML file not found at {xml_path}")
+#         print("Please ensure the cdpr.xml file exists")
+#         return
+    
+#     # Create simulation
+#     sim = HeadlessCDPRSimulation(xml_path, output_dir="trajectory_results")
+    
+#     try:
+#         sim.initialize()
+        
+#         # Define trajectory waypoints
+#         trajectories = {
+#             "simple_test": [
+#                 np.array([0.5, 0.5, 0.5]),
+#                 np.array([0, 0, 0.1])
+#             ],
+#             # "square_trajectory": [
+#             #     [0.5, 0.5, 1.0],
+#             #     [0.5, -0.5, 1.0],
+#             #     [-0.5, -0.5, 1.0],
+#             #     [-0.5, 0.5, 1.0],
+#             #     [0.0, 0.0, 1.309]
+#             # ]
+#         }
+        
+#         # Run each trajectory
+#         for traj_name, waypoints in trajectories.items():
+#             print(f"\n{'='*50}")
+#             print(f"Running trajectory: {traj_name}")
+#             print(f"{'='*50}")
+            
+#             success = sim.run_trajectory(waypoints, traj_name, max_steps_per_target=300)
+            
+#             if success:
+#                 print(f"✓ Trajectory '{traj_name}' completed successfully!")
+#             else:
+#                 print(f"⚠ Trajectory '{traj_name}' had some issues")
+            
+#             # Small pause between trajectories
+#             time.sleep(1)
+            
+#     except KeyboardInterrupt:
+#         print("\nTrajectory recording interrupted by user")
+#     except Exception as e:
+#         print(f"Error during simulation: {e}")
+#         import traceback
+#         traceback.print_exc()
+#     finally:
+#         sim.cleanup()
+
+def main():
+    xml_path = "cdpr.xml"
     if not os.path.exists(xml_path):
         print(f"Error: XML file not found at {xml_path}")
-        print("Please ensure the cdpr.xml file exists")
         return
-    
-    # Create simulation
+
     sim = HeadlessCDPRSimulation(xml_path, output_dir="trajectory_results")
-    
     try:
         sim.initialize()
-        
-        # Define trajectory waypoints
-        trajectories = {
-            "simple_test": [
-                np.array([0.5, 0.5, 0.5]),
-                np.array([0, 0, 0.1])
-            ],
-            # "square_trajectory": [
-            #     [0.5, 0.5, 1.0],
-            #     [0.5, -0.5, 1.0],
-            #     [-0.5, -0.5, 1.0],
-            #     [-0.5, 0.5, 1.0],
-            #     [0.0, 0.0, 1.309]
-            # ]
-        }
-        
-        # Run each trajectory
-        for traj_name, waypoints in trajectories.items():
-            print(f"\n{'='*50}")
-            print(f"Running trajectory: {traj_name}")
-            print(f"{'='*50}")
-            
-            success = sim.run_trajectory(waypoints, traj_name, max_steps_per_target=300)
-            
-            if success:
-                print(f"✓ Trajectory '{traj_name}' completed successfully!")
-            else:
-                print(f"⚠ Trajectory '{traj_name}' had some issues")
-            
-            # Small pause between trajectories
-            time.sleep(1)
-            
-    except KeyboardInterrupt:
-        print("\nTrajectory recording interrupted by user")
+
+        # Try a grasp at the red block's XY
+        success = sim.run_grasp_demo(object_xy=(0.5, 0.5), hover_z=0.35, grasp_z=0.06, lift_z=0.35, yaw=0.0)
+        print("✓ grasp flow finished:", success)
+
     except Exception as e:
-        print(f"Error during simulation: {e}")
-        import traceback
-        traceback.print_exc()
+        print("Error during simulation:", e)
+        import traceback; traceback.print_exc()
     finally:
         sim.cleanup()
 
