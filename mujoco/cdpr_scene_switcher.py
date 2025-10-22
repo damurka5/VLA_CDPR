@@ -229,7 +229,9 @@ def build_wrapper_mjcf(scene_xml: Path, cdpr_xml: Path, placed_object_xmls: list
     {includes_objects}
     </mujoco>
     """
+    out_xml.parent.mkdir(parents=True, exist_ok=True)  # ensure /.../wrappers/ exists
     out_xml.write_text(content, encoding="utf-8")
+
 
     
 
@@ -256,8 +258,22 @@ def main():
                 help="Force placed objects to be dynamic (inject <freejoint/> if missing).")
     ap.add_argument("--settle_time", type=float, default=1.0,
                 help="Seconds to simulate before the demo to let objects fall/settle.")
+    ap.add_argument("--wrapper_out", default=None,
+                help="Write final wrapper MJCF to this path (kept). If unset, uses a temp dir.")
+    ap.add_argument("--keep", action="store_true",
+                help="Don’t delete the temp working directory (for debugging).")
 
     args = ap.parse_args()
+
+    # Where to write the final wrapper
+    if args.wrapper_out:
+        wrapper_xml = Path(args.wrapper_out).resolve()
+        wrapper_xml.parent.mkdir(parents=True, exist_ok=True)
+        gen_base = wrapper_xml.parent     # <- persist placed_* and overrides here
+    else:
+        wrapper_xml = tmpdir / "cdpr_scene_wrapper.xml"
+        gen_base = tmpdir                 # <- ephemeral if no --wrapper_out
+
 
     scene_xml = find_scene_xml(args.scene)
     if not CDPR_XML.exists():
@@ -266,22 +282,23 @@ def main():
     # temp workspace
     tmpdir = Path(tempfile.mkdtemp(prefix="cdpr_scene_", dir=str(HERE)))
 
-    # 4a) scene (optionally z-shifted)
+    # Scene (z-shift if needed)
     if abs(args.scene_z) > 1e-6:
-        scene_for_include = tmpdir / f"{args.scene}_zshift.xml"
+        scene_for_include = gen_base / f"{args.scene}_zshift.xml"
         preprocess_scene_with_zoffset(scene_xml, args.scene_z, scene_for_include)
     else:
         scene_for_include = scene_xml
 
-    # 4b) cdpr (optionally ee_start override)
+    # CDPR (override ee_base pos if requested)
     if args.ee_start is not None:
         ee_xyz = np.fromstring(args.ee_start, sep=",", dtype=float)
         if ee_xyz.size != 3:
             raise ValueError("--ee_start must be 'x,y,z'")
-        cdpr_for_include = tmpdir / "cdpr_ee_override.xml"
+        cdpr_for_include = gen_base / "cdpr_ee_override.xml"
         preprocess_cdpr_set_ee_start(CDPR_XML, ee_xyz, cdpr_for_include)
     else:
         cdpr_for_include = CDPR_XML
+
 
     # Parse objects
     placements = []
@@ -297,13 +314,22 @@ def main():
     try:
         placed_xmls = []
         for idx, (name, obj_xml, pos, quat) in enumerate(placements):
-            placed_path = tmpdir / f"placed_{idx}_{name}.xml"
+            placed_path = gen_base / f"placed_{idx}_{name}.xml"
             make_placed_object_xml(obj_xml, placed_path, prefix=f"p{idx}", pos=pos, quat=quat,
-                       force_dynamic=args.object_dynamic)
+                                force_dynamic=args.object_dynamic)
             placed_xmls.append(placed_path)
 
-        wrapper_xml = tmpdir / "cdpr_scene_wrapper.xml"
+
+        wrapper_xml = (Path(args.wrapper_out).resolve()
+               if args.wrapper_out else (tmpdir / "cdpr_scene_wrapper.xml"))
         build_wrapper_mjcf(scene_for_include, cdpr_for_include, placed_xmls, wrapper_xml)
+
+        print(f"✅ Built wrapper: {wrapper_xml}")
+        print(f"   Includes {len(placed_xmls)} object(s).")
+
+        # Only delete tmpdir if we used it for everything
+        if not args.wrapper_out:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
         # Run your existing headless sim on the wrapper
@@ -349,6 +375,11 @@ def main():
         sim.save_trajectory_results(str(ts_dir), ts)
         sim.cleanup()
         print(f"✅ Loaded scene '{args.scene}' with {len(placements)} object(s). Wrapper at: {wrapper_xml}")
+        if args.wrapper_out or args.keep:
+            pass  # keep files
+        else:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
 
     finally:
         # Keep the temp folder for debugging by commenting this next line
