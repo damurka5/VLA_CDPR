@@ -403,6 +403,7 @@ class HeadlessCDPRSimulation:
 
     def save_trajectory_results(self, trajectory_dir, trajectory_name):
         """Save all trajectory data and videos"""
+        os.makedirs(trajectory_dir, exist_ok=True)
         print("Saving trajectory results...")
         
         # Save videos if we have frames
@@ -439,11 +440,9 @@ class HeadlessCDPRSimulation:
         print(f"Results saved to: {trajectory_dir}")
     
     def save_video(self, frames, filepath, fps=30):
-        """Save frames as MP4 video using imageio (more reliable than OpenCV)"""
         if not frames:
             return
-        
-        # Use imageio for more reliable video writing
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)  # ensure parent exists
         with imageio.get_writer(filepath, fps=fps) as writer:
             for frame in frames:
                 writer.append_data(frame)
