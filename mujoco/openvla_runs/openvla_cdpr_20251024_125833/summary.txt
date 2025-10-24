@@ -1,0 +1,9 @@
+CDPR Trajectory Summary
+=======================
+Trajectory: openvla_cdpr
+Timestamp: 2025-10-24 12:58:57
+Total frames captured: 800
+Total simulation steps: 800
+Simulation time: 13.33 seconds
+Final EE position: [-0.02397184 -0.01318194  0.62256102]
+Final target position: [-0.02575387 -0.01436813  0.70250547]
