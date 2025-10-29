@@ -52,13 +52,6 @@ class HeadlessCDPRController:
     def update_position(self, new_pos):
         self.pos = new_pos.copy()
 
-    # def compute_control(self, target_pos, current_ee_pos):
-    #     self.update_position(current_ee_pos)
-    #     cur_lengths = self.inverse_kinematics()
-    #     target_lengths = self.inverse_kinematics(target_pos)
-    #     # Map target cable lengths -> slider targets via a fixed offset
-    #     slider_positions = 0.9 - target_lengths  # preserves your original "magic number"
-    #     return slider_positions
     def compute_control(self, target_pos, current_ee_pos, current_slider_qpos=None):
         """
         Compute desired slider target positions given a target end-effector position.
@@ -137,14 +130,10 @@ class HeadlessCDPRSimulation:
         
         self._setup_offscreen_rendering()
         mj.mj_forward(self.model, self.data)
-        # self.hold_current_pose(warm_steps=0)
         # Seed target to current EE pose (so your higher-level controller doesn’t pull elsewhere)
         self.target_pos = self.get_end_effector_position().copy()
         self.controller.prev_lengths = self.controller.inverse_kinematics(self.target_pos)
 
-        # # **Critical**: neutralize position actuators to current joint state
-        # self._neutralize_position_actuators()
-        # self.hold_current_pose(warm_steps=0)
         self._match_sliders_to_ee_lengths(max_iter=12, tol=1e-4)
         print("Headless CDPR Simulation initialized successfully!")
         print(f"Using {'EGL' if EGL_AVAILABLE else 'software'} rendering")
@@ -154,7 +143,7 @@ class HeadlessCDPRSimulation:
         self.ee_cam = mj.MjvCamera()
 
         self.overview_cam.type = mj.mjtCamera.mjCAMERA_FREE
-        self.overview_cam.distance = 3.0 # previous value 3.0
+        self.overview_cam.distance = 1.5 # previous value 3.0
         self.overview_cam.azimuth = 0
         self.overview_cam.elevation = -35 # previous value -25
 
@@ -194,7 +183,6 @@ class HeadlessCDPRSimulation:
         """
         # current pose
         ee_now = self.get_end_effector_position()
-        print(f"EE_NOW: {ee_now}")
         # make it the target
         self.target_pos = ee_now.copy()
         # recompute lengths for this pose
@@ -624,62 +612,6 @@ class HeadlessCDPRSimulation:
             except:
                 pass
         print("Simulation cleanup completed")
-
-# def main():
-#     # Path to your XML file
-#     xml_path = "cdpr.xml"
-    
-#     # Check if XML file exists
-#     if not os.path.exists(xml_path):
-#         print(f"Error: XML file not found at {xml_path}")
-#         print("Please ensure the cdpr.xml file exists")
-#         return
-    
-#     # Create simulation
-#     sim = HeadlessCDPRSimulation(xml_path, output_dir="trajectory_results")
-    
-#     try:
-#         sim.initialize()
-        
-#         # Define trajectory waypoints
-#         trajectories = {
-#             "simple_test": [
-#                 np.array([0.5, 0.5, 0.5]),
-#                 np.array([0, 0, 0.1])
-#             ],
-#             # "square_trajectory": [
-#             #     [0.5, 0.5, 1.0],
-#             #     [0.5, -0.5, 1.0],
-#             #     [-0.5, -0.5, 1.0],
-#             #     [-0.5, 0.5, 1.0],
-#             #     [0.0, 0.0, 1.309]
-#             # ]
-#         }
-        
-#         # Run each trajectory
-#         for traj_name, waypoints in trajectories.items():
-#             print(f"\n{'='*50}")
-#             print(f"Running trajectory: {traj_name}")
-#             print(f"{'='*50}")
-            
-#             success = sim.run_trajectory(waypoints, traj_name, max_steps_per_target=300)
-            
-#             if success:
-#                 print(f"✓ Trajectory '{traj_name}' completed successfully!")
-#             else:
-#                 print(f"⚠ Trajectory '{traj_name}' had some issues")
-            
-#             # Small pause between trajectories
-#             time.sleep(1)
-            
-#     except KeyboardInterrupt:
-#         print("\nTrajectory recording interrupted by user")
-#     except Exception as e:
-#         print(f"Error during simulation: {e}")
-#         import traceback
-#         traceback.print_exc()
-#     finally:
-#         sim.cleanup()
 
 def main():
     xml_path = "cdpr.xml"

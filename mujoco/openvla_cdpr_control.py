@@ -266,13 +266,6 @@ class OpenVLACDPRRunner:
         for t in range(horizon_steps):
             # Replan from the EE camera periodically
             if t % replan_every == 0:
-                # rgb = self.capture_ee_rgb()
-                # act = self.vla.plan_5dof(rgb, self.instruction)
-                # xyz, yaw, grip = self.mapper.map(act, self.sim.get_end_effector_position())
-                # self.current_target = xyz
-                # self.current_yaw = yaw
-                # self.current_grip = grip
-                # in OpenVLACDPRRunner.run
                 rgb = self.capture_ee_rgb()
                 act_full = self.vla.plan_5dof(rgb, self.instruction)  # now returns full 7D (or more)
                 ee_now = self.sim.get_end_effector_position()
@@ -283,13 +276,6 @@ class OpenVLACDPRRunner:
 
             # Apply the most recent target each step (lets the low-level controller chase it)
             self.step_apply(self.current_target, self.current_yaw, self.current_grip)
-
-            # Simple “close on contact” heuristic (optional): if close to tabletop height and
-            # fingers touch object (you already have has_finger_contact), you could auto close.
-            # Example (commented):
-            # if t % 10 == 0 and self.sim.has_finger_contact():
-            #     self.sim.close_gripper()
-            #     for _ in range(settle_steps_after_close): self.sim.run_simulation_step(capture_frame=True)
 
             # Log
             ee = self.sim.get_end_effector_position()
