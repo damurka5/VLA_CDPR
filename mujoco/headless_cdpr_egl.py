@@ -34,7 +34,7 @@ def _id(model, objtype, name):
     return mj.mj_name2id(model, objtype, name)
 
 class HeadlessCDPRController:
-    def __init__(self, frame_points, initial_pos=np.array([0, 0, 1.309])):
+    def __init__(self, frame_points, initial_pos=np.array([0, 0, 1.309])): # initial position was 0 0 1.309
         self.frame_points = frame_points
         self.pos = initial_pos.astype(float)
         self.Kp = 100
@@ -52,13 +52,31 @@ class HeadlessCDPRController:
     def update_position(self, new_pos):
         self.pos = new_pos.copy()
 
-    def compute_control(self, target_pos, current_ee_pos):
+    # def compute_control(self, target_pos, current_ee_pos):
+    #     self.update_position(current_ee_pos)
+    #     cur_lengths = self.inverse_kinematics()
+    #     target_lengths = self.inverse_kinematics(target_pos)
+    #     # Map target cable lengths -> slider targets via a fixed offset
+    #     slider_positions = 0.9 - target_lengths  # preserves your original "magic number"
+    #     return slider_positions
+    def compute_control(self, target_pos, current_ee_pos, current_slider_qpos=None):
+        """
+        Compute desired slider target positions given a target end-effector position.
+        Optionally keep current joint qpos if target ≈ current.
+        """
         self.update_position(current_ee_pos)
         cur_lengths = self.inverse_kinematics()
         target_lengths = self.inverse_kinematics(target_pos)
-        # Map target cable lengths -> slider targets via a fixed offset
-        slider_positions = 0.9 - target_lengths  # preserves your original "magic number"
+
+        # If target is basically current → hold steady
+        if np.linalg.norm(target_pos - current_ee_pos) < 1e-4 and current_slider_qpos is not None:
+            return np.array(current_slider_qpos)
+
+        # otherwise use your length → slider mapping
+        slider_positions = 0.9 - target_lengths
         return slider_positions
+
+
 
 class HeadlessCDPRSimulation:
     def __init__(self, xml_path, output_dir="trajectory_videos"):
@@ -116,10 +134,18 @@ class HeadlessCDPRSimulation:
         except Exception:
             # Fallback: first geom belonging to target body
             self.geom_target = int(np.where(self.model.geom_bodyid == self.body_target)[0][0])
-                
+        
         self._setup_offscreen_rendering()
         mj.mj_forward(self.model, self.data)
+        # self.hold_current_pose(warm_steps=0)
+        # Seed target to current EE pose (so your higher-level controller doesn’t pull elsewhere)
+        self.target_pos = self.get_end_effector_position().copy()
+        self.controller.prev_lengths = self.controller.inverse_kinematics(self.target_pos)
 
+        # # **Critical**: neutralize position actuators to current joint state
+        # self._neutralize_position_actuators()
+        # self.hold_current_pose(warm_steps=0)
+        self._match_sliders_to_ee_lengths(max_iter=12, tol=1e-4)
         print("Headless CDPR Simulation initialized successfully!")
         print(f"Using {'EGL' if EGL_AVAILABLE else 'software'} rendering")
 
@@ -128,9 +154,9 @@ class HeadlessCDPRSimulation:
         self.ee_cam = mj.MjvCamera()
 
         self.overview_cam.type = mj.mjtCamera.mjCAMERA_FREE
-        self.overview_cam.distance = 3.0
+        self.overview_cam.distance = 3.0 # previous value 3.0
         self.overview_cam.azimuth = 0
-        self.overview_cam.elevation = -25
+        self.overview_cam.elevation = -35 # previous value -25
 
         self.ee_cam.type = mj.mjtCamera.mjCAMERA_FIXED
         self.ee_cam.fixedcamid = self.cam_id
@@ -160,6 +186,106 @@ class HeadlessCDPRSimulation:
         except Exception as e:
             print(f"Error capturing frame from {camera_name}: {e}")
             return np.zeros((self.offheight, self.offwidth, 3), dtype=np.uint8)
+
+    def hold_current_pose(self, warm_steps=0):
+        """
+        Seed the controller target to the CURRENT EE pose and set slider ctrl
+        so there is no immediate jump on the first step.
+        """
+        # current pose
+        ee_now = self.get_end_effector_position()
+        print(f"EE_NOW: {ee_now}")
+        # make it the target
+        self.target_pos = ee_now.copy()
+        # recompute lengths for this pose
+        cur_lengths = self.controller.inverse_kinematics(ee_now)
+        self.controller.prev_lengths = cur_lengths.copy()
+        # compute slider ctrl that keeps these lengths (your mapping)
+        slider_ctrl = 0.9 - cur_lengths
+        for j in range(4):
+            self.data.ctrl[j] = float(slider_ctrl[j])
+        # optional: do a few warm steps to settle without changing target
+        for _ in range(int(warm_steps)):
+            mj.mj_step(self.model, self.data)
+            
+    def _neutralize_position_actuators(self):
+        """
+        For every position actuator, set ctrl = current joint qpos so nothing
+        moves at t=0. This is crucial for slider_* (the cable winches).
+        """
+        # map joint -> qpos index
+        jnt_qposadr = self.model.jnt_qposadr
+        for i in range(self.model.nu):  # actuators
+            if self.model.actuator_trntype[i] != mj.mjtTrn.mjTRN_JOINT:
+                continue
+            # this actuator targets a joint position
+            j = self.model.actuator_trnid[i, 0]           # joint id
+            if j < 0: 
+                continue
+            qadr = jnt_qposadr[j]                         # index into qpos
+            # only safe if the actuator is mjtGain::position (yours are <position .../>)
+            self.data.ctrl[i] = float(self.data.qpos[qadr])
+
+    def _match_sliders_to_ee_lengths(self, max_iter=12, tol=1e-4):
+        """
+        Adjust the four slider joint positions so that the actual tendon lengths
+        match the geometric target lengths implied by the current EE position.
+        After this, set actuator ctrl = qpos so there is no initial tug.
+        """
+        mj.mj_forward(self.model, self.data)
+
+        # Map helper: joint name -> qpos index
+        jnt_id = {mj.mj_id2name(self.model, mj.mjtObj.mjOBJ_JOINT, i):
+                i for i in range(self.model.njnt)}
+        jnt_qadr = self.model.jnt_qposadr
+        def qpos_idx(jname): return jnt_qadr[jnt_id[jname]]
+
+        # Our four sliders
+        slider_names = ["slider_1", "slider_2", "slider_3", "slider_4"]
+        slider_q_idx = [qpos_idx(n) for n in slider_names]
+
+        # Tendon names (1:1 with sliders in your XML)
+        ten_id = {mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_TENDON, f"rope_{k}"): k-1 for k in range(1,5)}
+        tendon_idx = [mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_TENDON, f"rope_{k}") for k in range(1,5)]
+
+        # Target lengths from your geometric inverse kinematics
+        ee = self.get_end_effector_position()
+        target_len = self.controller.inverse_kinematics(ee)  # shape (4,)
+
+        # Newton update per-slider using numeric derivative dL/dq
+        for it in range(max_iter):
+            mj.mj_forward(self.model, self.data)
+            cur_len = np.array([self.data.ten_length[i] for i in tendon_idx])
+            err = target_len - cur_len
+            if np.linalg.norm(err, ord=np.inf) < tol:
+                break
+
+            for k in range(4):
+                qidx = slider_q_idx[k]
+                Lk = cur_len[k]
+
+                # numeric derivative dL/dq at this slider
+                dq = 1e-4
+                self.data.qpos[qidx] += dq
+                mj.mj_forward(self.model, self.data)
+                Lk2 = self.data.ten_length[tendon_idx[k]]
+                dLdq = (Lk2 - Lk) / dq
+                # restore
+                self.data.qpos[qidx] -= dq
+
+                if abs(dLdq) < 1e-8:
+                    continue  # avoid blowup; very unlikely here
+
+                # Newton step with a damping factor
+                delta = (target_len[k] - Lk) / dLdq
+                self.data.qpos[qidx] += 0.8 * delta  # 0.8 for stability
+
+            # keep model consistent
+            mj.mj_forward(self.model, self.data)
+
+        # Neutralize position actuators: ctrl = qpos for all position actuators
+        self._neutralize_position_actuators()
+
 
     def get_end_effector_position(self):
         return self.data.xpos[self.body_ee].copy()
@@ -280,7 +406,12 @@ class HeadlessCDPRSimulation:
 
     def run_simulation_step(self, capture_frame=True):
         ee_pos = self.get_end_effector_position()
-        control_signals = self.controller.compute_control(self.target_pos, ee_pos)
+        # control_signals = self.controller.compute_control(self.target_pos, ee_pos)
+        slider_qpos = [self.data.qpos[i] for i in range(4)]  # assuming sliders are first 4
+        control_signals = self.controller.compute_control(
+            self.target_pos, ee_pos, current_slider_qpos=slider_qpos
+        )
+
         # Apply slider targets by actuator index
         for j, act_id in enumerate(self.act_sliders):
             self.data.ctrl[act_id] = control_signals[j]

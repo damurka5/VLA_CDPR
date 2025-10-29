@@ -72,23 +72,19 @@ class OpenVLAPlanner:
 
     @torch.no_grad()
     def plan_5dof(self, image, instruction):
-        """
-        New 5-DoF API: returns np.array([x, y, z, yaw, grip]).
-        """
         act = self._plan_raw(image, instruction)
         if isinstance(act, torch.Tensor):
             act = act.detach().float().cpu().numpy()
         elif isinstance(act, (list, tuple)):
             act = np.array(act, dtype=float)
         elif not isinstance(act, np.ndarray):
-            act = np.zeros(5, dtype=float)
+            act = np.zeros(7, dtype=float)
 
-        # pad/truncate to length 5
-        if act.size < 5:
-            act = np.pad(act, (0, 5 - act.size), mode="constant")
-        else:
-            act = act[:5]
-        return act
+        # Ensure at least 7 dims to be safe
+        if act.size < 7:
+            act = np.pad(act, (0, 7 - act.size), mode="constant")
+        return act  # <-- return full vector; no truncation
+        
 
     def _plan_raw(self, image, instruction, unnorm_key="bridge_orig"):
         """
@@ -144,21 +140,22 @@ class OpenVLAPlanner:
 # -------------------- Action mapping --------------------
 
 class ActionMapper5DoF:
-    """
-    Map OpenVLA action vector (various lengths/scales) -> (xyz, yaw, grip)
-    with clamping to workspace.
-    """
     def __init__(self,
                  x_bound=(-0.9, 0.9),
                  y_bound=(-0.9, 0.9),
                  z_bound=(0.10, 1.30),
-                 gripper_range=(0.0, 0.06)):
+                 gripper_range=(0.0, 0.06),
+                 index_map=(0, 1, 2, 3, 6),  # <-- x,y,z,yaw,grip indices in VLA action
+                 gripper_normalized=True,    # True: 0..1 or -1..1 -> meters
+                 gripper_invert=False):      # set True if your model uses 1=closed
         self.xb, self.yb, self.zb = x_bound, y_bound, z_bound
         self.gr_min, self.gr_max = gripper_range
+        self.index_map = index_map
+        self.gripper_normalized = gripper_normalized
+        self.gripper_invert = gripper_invert
 
     @staticmethod
     def _maybe_denorm(v, low, high):
-        # If looks normalized (|v| <= 1.2), map from [-1,1]→[low,high], else clip to [low,high].
         if np.isfinite(v) and abs(v) <= 1.2:
             return low + 0.5 * (v + 1.0) * (high - low)
         return np.clip(v, low, high)
@@ -167,37 +164,40 @@ class ActionMapper5DoF:
     def _wrap_pi(a):
         return (a + np.pi) % (2*np.pi) - np.pi
 
-    def map(self, act_vec: np.ndarray, fallback_xyz: np.ndarray) -> tuple[np.ndarray, float, float]:
-        """
-        act_vec:  (>=3) x,y,z,[yaw],[grip]
-        returns: (xyz, yaw, grip_opening_m)
-        """
-        a = np.array(act_vec, dtype=float).flatten()
-        # x,y,z
-        tx = self._maybe_denorm(a[0] if a.size > 0 else fallback_xyz[0], *self.xb)
-        ty = self._maybe_denorm(a[1] if a.size > 1 else fallback_xyz[1], *self.yb)
-        tz = self._maybe_denorm(a[2] if a.size > 2 else fallback_xyz[2], *self.zb)
+    def map(self, act_full: np.ndarray, fallback_xyz: np.ndarray):
+        a = np.array(act_full, dtype=float).flatten()
+        # pick components
+        ix, iy, iz, iyaw, igrip = self.index_map
+
+        # xyz
+        tx = self._maybe_denorm(a[ix] if a.size > ix else fallback_xyz[0], *self.xb)
+        ty = self._maybe_denorm(a[iy] if a.size > iy else fallback_xyz[1], *self.yb)
+        tz = self._maybe_denorm(a[iz] if a.size > iz else fallback_xyz[2], *self.zb)
         xyz = np.array([tx, ty, tz], dtype=float)
 
-        # yaw
-        if a.size >= 4:
-            yaw_raw = a[3]
+        # yaw: allow normalized in [-1,1] or radians directly
+        if a.size > iyaw:
+            yaw_raw = a[iyaw]
             yaw = self._wrap_pi(yaw_raw if abs(yaw_raw) > 1.2 else yaw_raw * np.pi)
         else:
             yaw = 0.0
 
         # gripper
-        if a.size >= 5:
-            g = a[4]
-            if -0.01 <= g <= 1.01:     # normalized 0..1 (or -1..1)
-                g = max(0.0, min(1.0, g))
+        if a.size > igrip:
+            g = float(a[igrip])
+            if self.gripper_normalized:
+                # clamp to [0,1] when normalized in [0..1] or [-1..1]
+                g = max(0.0, min(1.0, 0.5 * (g + 1.0) if g < 0 or g > 1 else g))
+                if self.gripper_invert:
+                    g = 1.0 - g
                 grip = self.gr_min + g * (self.gr_max - self.gr_min)
-            else:                      # maybe already in meters
+            else:
                 grip = np.clip(g, self.gr_min, self.gr_max)
         else:
-            grip = self.gr_max  # open by default
+            grip = self.gr_max
 
         return xyz, yaw, grip
+
 
 # -------------------- Runner --------------------
 
@@ -226,6 +226,7 @@ class OpenVLACDPRRunner:
 
     def initialize(self):
         self.sim.initialize()
+        self.sim.hold_current_pose(warm_steps=0) # Added to keep desired initial position
         # Resolve body pose once so we can hold XYZ while we rotate, etc.
         self.current_target = self.sim.get_end_effector_position().copy()
 
@@ -265,12 +266,19 @@ class OpenVLACDPRRunner:
         for t in range(horizon_steps):
             # Replan from the EE camera periodically
             if t % replan_every == 0:
+                # rgb = self.capture_ee_rgb()
+                # act = self.vla.plan_5dof(rgb, self.instruction)
+                # xyz, yaw, grip = self.mapper.map(act, self.sim.get_end_effector_position())
+                # self.current_target = xyz
+                # self.current_yaw = yaw
+                # self.current_grip = grip
+                # in OpenVLACDPRRunner.run
                 rgb = self.capture_ee_rgb()
-                act = self.vla.plan_5dof(rgb, self.instruction)
-                xyz, yaw, grip = self.mapper.map(act, self.sim.get_end_effector_position())
-                self.current_target = xyz
-                self.current_yaw = yaw
-                self.current_grip = grip
+                act_full = self.vla.plan_5dof(rgb, self.instruction)  # now returns full 7D (or more)
+                ee_now = self.sim.get_end_effector_position()
+                xyz, yaw, grip = self.mapper.map(act_full, ee_now)
+                self.current_target, self.current_yaw, self.current_grip = xyz, yaw, grip
+
                 print(f"[t={t:04d}] VLA action -> xyz={xyz.round(3)}, yaw={yaw:.2f}, grip={grip:.3f}")
 
             # Apply the most recent target each step (lets the low-level controller chase it)
