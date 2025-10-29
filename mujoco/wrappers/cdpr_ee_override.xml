@@ -3,7 +3,7 @@
   <compiler autolimits="true" />
   <default>
     <site type="sphere" rgba="1 0 0 1" size="0.005" />
-    <tendon rgba="0 1 0 1" />
+    <tendon rgba="0.2 0.2 0.2 1" />
   </default>
   <visual>
     <headlight diffuse=".7 .7 .7" />
@@ -78,7 +78,7 @@
       <inertial pos="0 0 0" mass="0.25" diaginertia="0.0003 0.0003 0.0003" />
       <geom name="target_box" type="box" size="0.1 0.1 0.01" rgba="1 0 0 1" friction="1.2 0.01 0.0001" condim="4" />
     </body>
-    <body name="ee_base" pos="0.0 0.0 0.25">
+    <body name="ee_base" pos="0.0 0.0 0.65">
       <joint name="ee_free" type="free" damping="3" armature="0.002" />
       <inertial pos="0 0 0" mass="1.2" diaginertia="0.02 0.02 0.02" />
       <site name="topcenter" pos="0 0 0.08" size="0.006" rgba="0 0 1 1" />
@@ -97,14 +97,14 @@
             <body name="finger_left_car" pos="0.035 0 0">
               <inertial pos="0 0 0" mass="0.08" diaginertia="0.0002 0.0002 0.00015" />
               <joint name="finger_l" type="slide" axis="1 0 0" limited="true" range="0 0.06" damping="3.0" />
-              <geom name="finger_l_link" type="box" size="0.012 0.01 0.055" pos="0 0 -0.055" rgba="0.9 0.15 0.15 1" contype="1" conaffinity="1" friction="1.5 0.02 0.01" />
-              <geom name="finger_l_tip" type="capsule" fromto="0 0 -0.11  0 0 -0.135" size="0.008" rgba="0.9 0.15 0.15 1" contype="1" conaffinity="1" friction="1.5 0.02 0.01" />
+              <geom name="finger_l_link" type="box" size="0.012 0.01 0.055" pos="0 0 -0.055" rgba="0.4 0.4 0.4 1" contype="1" conaffinity="1" friction="1.5 0.02 0.01" />
+              <geom name="finger_l_tip" type="capsule" fromto="0 0 -0.11  0 0 -0.135" size="0.008" rgba="0.4 0.4 0.4 1" contype="1" conaffinity="1" friction="1.5 0.02 0.01" />
             </body>
             <body name="finger_right_car" pos="-0.035 0 0">
               <inertial pos="0 0 0" mass="0.08" diaginertia="0.0002 0.0002 0.00015" />
               <joint name="finger_r" type="slide" axis="-1 0 0" limited="true" range="0 0.06" damping="3.0" />
-              <geom name="finger_r_link" type="box" size="0.012 0.01 0.055" pos="0 0 -0.055" rgba="0.9 0.15 0.15 1" contype="1" conaffinity="1" friction="1.5 0.02 0.01" />
-              <geom name="finger_r_tip" type="capsule" fromto="0 0 -0.11  0 0 -0.135" size="0.008" rgba="0.9 0.15 0.15 1" contype="1" conaffinity="1" friction="1.5 0.02 0.01" />
+              <geom name="finger_r_link" type="box" size="0.012 0.01 0.055" pos="0 0 -0.055" rgba="0.4 0.4 0.4 1" contype="1" conaffinity="1" friction="1.5 0.02 0.01" />
+              <geom name="finger_r_tip" type="capsule" fromto="0 0 -0.11  0 0 -0.135" size="0.008" rgba="0.4 0.4 0.4 1" contype="1" conaffinity="1" friction="1.5 0.02 0.01" />
             </body>
           </body>
         </body>

@@ -1,9 +1,9 @@
 CDPR Trajectory Summary
 =======================
 Trajectory: scene_switcher
-Timestamp: 2025-10-29 14:28:39
+Timestamp: 2025-10-29 15:07:04
 Total frames captured: 120
-Total simulation steps: 260
-Simulation time: 4.33 seconds
-Final EE position: [0.45224209 0.45451634 0.27258222]
+Total simulation steps: 200
+Simulation time: 3.33 seconds
+Final EE position: [0.45143204 0.45246183 0.27235278]
 Final target position: [0.5  0.5  0.35]

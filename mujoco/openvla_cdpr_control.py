@@ -232,10 +232,10 @@ class OpenVLACDPRRunner:
 
     def capture_ee_rgb(self):
         # Use the EE camera that your sim already configures
-        # return self.sim.capture_frame(self.sim.ee_cam, "ee_camera")
+        return self.sim.capture_frame(self.sim.ee_cam, "ee_camera")
         
         # Use the overview camera 
-        return self.sim.capture_frame(self.sim.overview_cam, "overview")
+        # return self.sim.capture_frame(self.sim.overview_cam, "overview")
     
 
     def step_apply(self, xyz: np.ndarray, yaw: float, grip: float):
