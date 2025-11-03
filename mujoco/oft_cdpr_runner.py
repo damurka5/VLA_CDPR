@@ -387,7 +387,11 @@ def main():
     grip_now   = getattr(sim, "get_gripper_opening", lambda: 0.03)()
     
     # ---- roll out ----
+    refresh_interval = len(chunk) # to refresh trajectory "online" in the future
     for t in range(args.steps):
+        if t % refresh_interval == 0:
+            chunk = request_chunk()
+            c_idx = 0
         if c_idx >= len(chunk):
             chunk = request_chunk()
             c_idx = 0
