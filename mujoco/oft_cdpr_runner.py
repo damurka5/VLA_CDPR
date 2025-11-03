@@ -10,6 +10,14 @@ HERE = Path(__file__).resolve().parent
 sys.path.append(str(HERE))
 from headless_cdpr_egl import HeadlessCDPRSimulation  # your class
 
+import sys, os
+# Try to locate LIBERO if not installed as a package
+if "libero" not in sys.modules:
+    candidate = "/root/repo/LIBERO"
+    if os.path.isdir(candidate):
+        sys.path.append(candidate)
+
+
 # ---- openvla-oft imports (run in openvla-oft env) ----
 from experiments.robot.libero.run_libero_eval import GenerateConfig
 from experiments.robot.openvla_utils import (
@@ -22,36 +30,67 @@ from prismatic.vla.constants import NUM_ACTIONS_CHUNK  # chunk length
 def clamp(v, lo, hi):
     return float(max(lo, min(hi, v)))
 
+def _maybe_unnorm_1d(val, lo, hi):
+    # if it looks normalized, map from [-1,1] -> [lo,hi]
+    if -1.2 <= val <= 1.2:
+        return lo + 0.5*(val+1.0)*(hi-lo)
+    return clamp(val, lo, hi)
+
 def map_7d_to_cdpr5(act7, xyz_bounds, gripper_range):
-    """
-    act7: [x,y,z,yaw,pitch,roll,gripper]
-    returns: xyz(3), yaw(float), grip_opening_m(float)
-    """
     a = np.array(act7, dtype=float).flatten()
-    if a.size < 7:  # pad if needed
-        a = np.pad(a, (0, 7 - a.size))
+    if a.size < 7:
+        a = np.pad(a, (0, 7-a.size))
 
-    # assume OpenVLA-OFT emits in WORLD units already; if normalized, add a remap here
     (xlo, xhi), (ylo, yhi), (zlo, zhi) = xyz_bounds
-    x = clamp(a[0], xlo, xhi)
-    y = clamp(a[1], ylo, yhi)
-    z = clamp(a[2], zlo, zhi)
 
-    # yaw: allow either radians or [-1,1] normalized; if looks small, scale by pi
+    x = _maybe_unnorm_1d(a[0], xlo, xhi)
+    y = _maybe_unnorm_1d(a[1], ylo, yhi)
+    z = _maybe_unnorm_1d(a[2], zlo, zhi)
+
     yaw_raw = float(a[3])
     yaw = yaw_raw if abs(yaw_raw) > 1.2 else yaw_raw * np.pi
-    # wrap to [-pi, pi]
     yaw = (yaw + np.pi) % (2*np.pi) - np.pi
 
-    # gripper: assume normalized [0..1] or [-1..1] → meters
     g = float(a[6])
     if -1.2 <= g <= 1.2:
-        g = 0.5 * (g + 1.0)  # map [-1,1]→[0,1]
+        g = 0.5*(g+1.0)  # [0,1]
     g = clamp(g, 0.0, 1.0)
     gr_lo, gr_hi = gripper_range
-    grip = gr_lo + g * (gr_hi - gr_lo)
+    grip = gr_lo + g*(gr_hi-gr_lo)
 
     return np.array([x, y, z]), yaw, grip
+
+
+# def map_7d_to_cdpr5(act7, xyz_bounds, gripper_range):
+#     """
+#     act7: [x,y,z,yaw,pitch,roll,gripper]
+#     returns: xyz(3), yaw(float), grip_opening_m(float)
+#     """
+#     a = np.array(act7, dtype=float).flatten()
+#     if a.size < 7:  # pad if needed
+#         a = np.pad(a, (0, 7 - a.size))
+
+#     # assume OpenVLA-OFT emits in WORLD units already; if normalized, add a remap here
+#     (xlo, xhi), (ylo, yhi), (zlo, zhi) = xyz_bounds
+#     x = clamp(a[0], xlo, xhi)
+#     y = clamp(a[1], ylo, yhi)
+#     z = clamp(a[2], zlo, zhi)
+
+#     # yaw: allow either radians or [-1,1] normalized; if looks small, scale by pi
+#     yaw_raw = float(a[3])
+#     yaw = yaw_raw if abs(yaw_raw) > 1.2 else yaw_raw * np.pi
+#     # wrap to [-pi, pi]
+#     yaw = (yaw + np.pi) % (2*np.pi) - np.pi
+
+#     # gripper: assume normalized [0..1] or [-1..1] → meters
+#     g = float(a[6])
+#     if -1.2 <= g <= 1.2:
+#         g = 0.5 * (g + 1.0)  # map [-1,1]→[0,1]
+#     g = clamp(g, 0.0, 1.0)
+#     gr_lo, gr_hi = gripper_range
+#     grip = gr_lo + g * (gr_hi - gr_lo)
+
+#     return np.array([x, y, z]), yaw, grip
 
 def make_observation(sim, task_text: str):
     """
@@ -90,7 +129,10 @@ def main():
     ap.add_argument("--xml", required=True, help="Wrapper MJCF (scene+cdpr+objects).")
     ap.add_argument("--ckpt", default="moojink/openvla-7b-oft-finetuned-libero-spatial",
                     help="OpenVLA-OFT checkpoint id")
-    ap.add_argument("--center_crop", type=bool, default=True)
+    # ap.add_argument("--center_crop", type=bool, default=True)
+    ap.add_argument("--center_crop", dest="center_crop", action="store_true")
+    ap.add_argument("--no_center_crop", dest="center_crop", action="store_false")
+    ap.set_defaults(center_crop=True)
     ap.add_argument("--steps", type=int, default=600)
     ap.add_argument("--chunk_replan", type=int, default=NUM_ACTIONS_CHUNK,
                     help="Replan each chunk: request a new action chunk every N steps.")
