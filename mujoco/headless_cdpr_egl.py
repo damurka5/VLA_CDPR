@@ -116,6 +116,11 @@ class HeadlessCDPRSimulation:
             mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "slider_3_pos"),
             mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "slider_4_pos"),
         ]
+        self.slider_joint_ids = [
+        mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_JOINT, f"slider_{k}") for k in range(1,5)
+        ]
+        self.slider_qadr = [self.model.jnt_qposadr[jid] for jid in self.slider_joint_ids]
+   
         # Tool actuators
         self.act_yaw     = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "act_ee_yaw")
         self.act_gripper = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "act_gripper")
@@ -142,10 +147,15 @@ class HeadlessCDPRSimulation:
         self.overview_cam = mj.MjvCamera()
         self.ee_cam = mj.MjvCamera()
 
+        # self.overview_cam.type = mj.mjtCamera.mjCAMERA_FREE
+        # self.overview_cam.distance = 1.5 # previous value 3.0
+        # self.overview_cam.azimuth = 0
+        # self.overview_cam.elevation = -35 # previous value -25
         self.overview_cam.type = mj.mjtCamera.mjCAMERA_FREE
-        self.overview_cam.distance = 1.5 # previous value 3.0
-        self.overview_cam.azimuth = 0
-        self.overview_cam.elevation = -35 # previous value -25
+        self.overview_cam.lookat[:] = np.array([0.0, 0.0, 0.10])  # center of table
+        self.overview_cam.distance = 1.5
+        self.overview_cam.azimuth = 90     # look from -y toward +y
+        self.overview_cam.elevation = -30   # slight downward tilt
 
         self.ee_cam.type = mj.mjtCamera.mjCAMERA_FIXED
         self.ee_cam.fixedcamid = self.cam_id
@@ -395,12 +405,23 @@ class HeadlessCDPRSimulation:
     def run_simulation_step(self, capture_frame=True):
         ee_pos = self.get_end_effector_position()
         # control_signals = self.controller.compute_control(self.target_pos, ee_pos)
-        slider_qpos = [self.data.qpos[i] for i in range(4)]  # assuming sliders are first 4
+        # slider_qpos = [self.data.qpos[i] for i in range(4)]  # assuming sliders are first 4
+        # control_signals = self.controller.compute_control(
+        #     self.target_pos, ee_pos, current_slider_qpos=slider_qpos
+        # )
+
+        # # Apply slider targets by actuator index
+        # for j, act_id in enumerate(self.act_sliders):
+        #     self.data.ctrl[act_id] = control_signals[j]
+
+        # mj.mj_step(self.model, self.data)
+        # ✅ read the actual slider qpos (not qpos[0:4])
+        slider_qpos = [self.data.qpos[idx] for idx in self.slider_qadr]
+
         control_signals = self.controller.compute_control(
             self.target_pos, ee_pos, current_slider_qpos=slider_qpos
         )
 
-        # Apply slider targets by actuator index
         for j, act_id in enumerate(self.act_sliders):
             self.data.ctrl[act_id] = control_signals[j]
 

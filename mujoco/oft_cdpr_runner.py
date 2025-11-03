@@ -4,6 +4,8 @@ from pathlib import Path
 from datetime import datetime
 import numpy as np
 from PIL import Image
+import numpy as np
+import mujoco as mj
 
 # ---- repo local import of your sim ----
 HERE = Path(__file__).resolve().parent
@@ -25,10 +27,113 @@ from experiments.robot.openvla_utils import (
 )
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK  # chunk length
 
+import itertools
+import copy
+
+# ---------- auto-orient helpers ----------
+
+def guess_goal_xy(sim, override=None):
+    if override is not None:
+        return np.array(override[:2], dtype=float)
+
+    # Prefer placed LIBERO objects (prefixed in your scene_switcher as p0_, p1_, ...)
+    names = []
+    for bid in range(sim.model.nbody):
+        nm = mj.mj_id2name(sim.model, mj.mjtObj.mjOBJ_BODY, bid)
+        names.append(nm if nm is not None else "")
+    cand_ids = [i for i,n in enumerate(names)
+                if n.startswith(("p0_", "p1_", "p2_", "p3_", "p4_"))]
+
+    if cand_ids:
+        return sim.data.xpos[cand_ids[0], :2].copy()
+
+    # Fallback: your red block ("target_object")
+    try:
+        return sim.get_target_position()[:2].copy()
+    except:
+        # Fallback to current EE XY if nothing else
+        return sim.get_end_effector_position()[:2].copy()
+
+def snapshot(sim):
+    # capture full sim state + your controller target
+    return {
+        "qpos": sim.data.qpos.copy(),
+        "qvel": sim.data.qvel.copy(),
+        "ctrl": sim.data.ctrl.copy(),
+        "target_pos": sim.target_pos.copy() if hasattr(sim, "target_pos") else None,
+    }
+
+def restore(sim, snap):
+    sim.data.qpos[:] = snap["qpos"]
+    sim.data.qvel[:] = snap["qvel"]
+    sim.data.ctrl[:] = snap["ctrl"]
+    if snap["target_pos"] is not None and hasattr(sim, "target_pos"):
+        sim.target_pos = snap["target_pos"].copy()
+    mj.mj_forward(sim.model, sim.data)  # recompute derived state
+
+def apply_mapping(vec3, perm, sign):
+    v = np.array(vec3, dtype=float)
+    v = v[list(perm)]
+    return v * np.array(sign, dtype=float)
+
+def probe_mapping(sim, acts, perm, sign, xyz_bounds, k_xyz=0.35, steps=25, goal_xy_override=None):
+    snap0 = snapshot(sim)
+    xyz_t = sim.get_end_effector_position().copy()
+    goal_xy = guess_goal_xy(sim, goal_xy_override)
+
+    (xlo,xhi), (ylo,yhi), (zlo,zhi) = xyz_bounds
+    d0 = np.linalg.norm(xyz_t[:2] - goal_xy)
+
+    for i in range(min(steps, len(acts))):
+        a = acts[i]
+        dxyz_raw = np.array([np.clip(a[0], -1, 1),
+                             np.clip(a[1], -1, 1),
+                             np.clip(a[2], -1, 1)], dtype=float) * k_xyz
+        dxyz = apply_mapping(dxyz_raw, perm, sign)
+
+        xyz_t = xyz_t + dxyz
+        xyz_t[0] = np.clip(xyz_t[0], xlo, xhi)
+        xyz_t[1] = np.clip(xyz_t[1], ylo, yhi)
+        xyz_t[2] = np.clip(xyz_t[2], zlo, zhi)
+
+        sim.set_target_position(xyz_t)
+        # a couple of inner steps so plant follows the new target
+        for _ in range(2):
+            sim.run_simulation_step(capture_frame=False)
+
+    dT = np.linalg.norm(sim.get_end_effector_position()[:2] - goal_xy)
+    restore(sim, snap0)
+    return d0 - dT  # positive means "moved closer"
+
+def auto_orient_actions(sim, request_chunk_fn, xyz_bounds):
+    import itertools
+    acts = np.array(request_chunk_fn(), dtype=float)
+    if acts.ndim != 2 or acts.shape[1] < 7:
+        return ((0,1,2), (1,1,1))  # fallback
+
+    perms = list(itertools.permutations([0,1,2], 3))
+    signs = [(sx,sy,sz) for sx in (1,-1) for sy in (1,-1) for sz in (1,-1)]
+
+    best = ((0,1,2),(1,1,1)); best_gain = -1e9
+    for p in perms:
+        for s in signs:
+            gain = probe_mapping(sim, acts, p, s, xyz_bounds, k_xyz=0.35, steps=20)
+            if gain > best_gain:
+                best, best_gain = (p,s), gain
+
+    print(f"[auto-orient] picked perm={best[0]} sign={best[1]} (gain={best_gain:.3f})")
+    return best
+
 # ---------- mapping & utils ----------
 
 def clamp(v, lo, hi):
     return float(max(lo, min(hi, v)))
+
+def norm01(v, lo, hi): 
+    return (np.clip(v, lo, hi) - lo) / (hi - lo + 1e-9)
+
+def norm11_from_bounds(v, lo, hi):
+    return 2.0 * norm01(v, lo, hi) - 1.0
 
 def _maybe_unnorm_1d(val, lo, hi):
     # if it looks normalized, map from [-1,1] -> [lo,hi]
@@ -92,33 +197,92 @@ def map_7d_to_cdpr5(act7, xyz_bounds, gripper_range):
 
 #     return np.array([x, y, z]), yaw, grip
 
-def make_observation(sim, task_text: str):
+def map_7d_delta_to_cdpr5(act7, xyz_bounds, gripper_range,
+                          k_xyz=0.25, k_yaw=np.pi*0.20, k_grip=0.5,
+                          max_step_xyz=0.08, max_step_yaw=np.deg2rad(20), max_step_grip=0.02):
     """
-    Build OFT-style observation dict.
-    Images must be np.uint8 HxWx3 (RGB). Proprio is 8-D for the pretrained projector:
-      [ee_x, ee_y, ee_z, yaw, pitch=0, roll=0, dummy=0, gripper]
+    Interpret act7 as *deltas* in normalized [-1,1] space:
+      dx,dy,dz in [-1,1]  -> meters via k_xyz (then clipped to max_step_xyz)
+      dyaw in [-1,1]      -> radians via k_yaw (clipped)
+      grip in [-1,1] or [0,1] -> delta open amount (meters)
+    Returns (delta_xyz, delta_yaw, delta_grip).
     """
-    # ---- images as np.uint8 arrays (RGB) ----
-    full_rgb  = sim.capture_frame(sim.overview_cam, "overview")   # already HxWx3 uint8
+    a = np.array(act7, dtype=float).flatten()
+    if a.size < 7:
+        a = np.pad(a, (0, 7 - a.size))
+    # normalize plausible inputs
+    dx = float(np.clip(a[0], -1, 1)) * k_xyz
+    dy = float(np.clip(a[1], -1, 1)) * k_xyz
+    dz = float(np.clip(a[2], -1, 1)) * k_xyz
+    dyaw = float(np.clip(a[3], -1, 1)) * k_yaw
+
+    # gripper: allow [-1,1] → delta-fraction of range
+    g = float(a[6])
+    if -1.2 <= g <= 1.2:
+        g = 0.5 * (g)  # scale down; feel free to tune
+    dgrip = g * (gripper_range[1] - gripper_range[0]) * k_grip
+
+    # per-step clamps (safety/comfort)
+    dx = float(np.clip(dx, -max_step_xyz, max_step_xyz))
+    dy = float(np.clip(dy, -max_step_xyz, max_step_xyz))
+    dz = float(np.clip(dz, -max_step_xyz, max_step_xyz))
+    dyaw = float(np.clip(dyaw, -max_step_yaw, max_step_yaw))
+    dgrip = float(np.clip(dgrip, -max_step_grip, max_step_grip))
+
+    return np.array([dx, dy, dz]), dyaw, dgrip
+
+
+# def make_observation(sim, task_text: str):
+#     """
+#     Build OFT-style observation dict.
+#     Images must be np.uint8 HxWx3 (RGB). Proprio is 8-D for the pretrained projector:
+#       [ee_x, ee_y, ee_z, yaw, pitch=0, roll=0, dummy=0, gripper]
+#     """
+#     # ---- images as np.uint8 arrays (RGB) ----
+#     full_rgb  = sim.capture_frame(sim.overview_cam, "overview")   # already HxWx3 uint8
+#     wrist_rgb = sim.capture_frame(sim.ee_cam, "ee_camera")
+#     # ensure dtype and contiguous memory
+#     full_rgb  = np.ascontiguousarray(full_rgb, dtype=np.uint8)
+#     wrist_rgb = np.ascontiguousarray(wrist_rgb, dtype=np.uint8)
+
+#     # ---- proprio (8-D expected by OFT checkpoints) ----
+#     ee   = sim.get_end_effector_position().astype(np.float32)  # (3,)
+#     yaw  = float(getattr(sim, "get_yaw", lambda: 0.0)())
+#     grip = float(getattr(sim, "get_gripper_opening", lambda: 0.03)())
+#     proprio = np.array([ee[0], ee[1], ee[2], yaw, 0.0, 0.0, 0.0, grip], dtype=np.float32)
+
+#     obs = {
+#         "full_image":  full_rgb,   # <- NumPy, not PIL
+#         "wrist_image": wrist_rgb,  # <- NumPy, not PIL
+#         "state": proprio,
+#         "task_description": task_text,
+#     }
+#     return obs, proprio.size
+
+def make_observation(sim, task_text, xyz_bounds=((-0.755, 0.755),(-0.755, 0.755),(0, 1.309)), gripper_range=(0, 1), normalize_proprio=True):
+    full_rgb  = sim.capture_frame(sim.overview_cam, "overview")
     wrist_rgb = sim.capture_frame(sim.ee_cam, "ee_camera")
-    # ensure dtype and contiguous memory
-    full_rgb  = np.ascontiguousarray(full_rgb, dtype=np.uint8)
-    wrist_rgb = np.ascontiguousarray(wrist_rgb, dtype=np.uint8)
-
-    # ---- proprio (8-D expected by OFT checkpoints) ----
-    ee   = sim.get_end_effector_position().astype(np.float32)  # (3,)
-    yaw  = float(getattr(sim, "get_yaw", lambda: 0.0)())
+    ee   = sim.get_end_effector_position().astype(np.float32)
+    yaw  = float(sim.get_yaw()) if hasattr(sim, "get_yaw") else 0.0
     grip = float(getattr(sim, "get_gripper_opening", lambda: 0.03)())
-    proprio = np.array([ee[0], ee[1], ee[2], yaw, 0.0, 0.0, 0.0, grip], dtype=np.float32)
 
-    obs = {
-        "full_image":  full_rgb,   # <- NumPy, not PIL
-        "wrist_image": wrist_rgb,  # <- NumPy, not PIL
-        "state": proprio,
-        "task_description": task_text,
-    }
+    if normalize_proprio:
+        (xlo, xhi), (ylo, yhi), (zlo, zhi) = xyz_bounds
+        ee_n = np.array([
+            norm11_from_bounds(ee[0], xlo, xhi),
+            norm11_from_bounds(ee[1], ylo, yhi),
+            norm11_from_bounds(ee[2], zlo, zhi),
+            np.clip(yaw/np.pi, -1, 1),   # yaw in [-pi,pi] → [-1,1]
+            0.0, 0.0, 0.0,
+            norm11_from_bounds(grip, gripper_range[0], gripper_range[1]),
+        ], dtype=np.float32)
+        proprio = ee_n
+    else:
+        proprio = np.array([ee[0], ee[1], ee[2], yaw, 0,0,0, grip], dtype=np.float32)
+
+    obs = {"full_image": full_rgb, "wrist_image": wrist_rgb, "state": proprio,
+           "task_description": task_text}
     return obs, proprio.size
-
 
 
 # ---------- runner ----------
@@ -195,25 +359,62 @@ def main():
     # first chunk
     chunk = request_chunk()
     c_idx = 0
+    
+    # --- quick sanity snapshot ---
+    # obs_dbg, _ = make_observation(sim, args.instr, xyz_bounds, gr_range, normalize_proprio=True)
+    # Image.fromarray(obs_dbg["full_image"]).save("diag_full.png")
+    # Image.fromarray(obs_dbg["wrist_image"]).save("diag_wrist.png")
+    # print("[diag] saved diag_full.png / diag_wrist.png")
 
+    # acts = get_vla_action(cfg, vla, processor, obs_dbg, obs_dbg["task_description"], action_head,
+    #                     get_proprio_projector(cfg, llm_dim=vla.llm_dim, proprio_dim=_))
+    # acts = np.array(acts, dtype=float)
+    # print("[diag] first 5 actions:\n", acts[:5])
+    # print("[diag] action mean/std:", acts.mean(axis=0), acts.std(axis=0))
+
+    # ee_before = sim.get_end_effector_position().copy()
+    # for k in range(min(30, len(acts))):
+    #     xyz, yaw, grip = map_7d_to_cdpr5(acts[k], xyz_bounds, gr_range)
+    #     sim.set_target_position(xyz)
+    #     if hasattr(sim, "set_yaw"): sim.set_yaw(yaw)
+    #     if hasattr(sim, "set_gripper"): sim.set_gripper(grip)
+    #     sim.run_simulation_step(capture_frame=False)
+    # ee_after = sim.get_end_effector_position().copy()
+    # print("[diag] Δee after 30 action steps:", (ee_after - ee_before))
+
+    xyz_target = sim.get_end_effector_position().copy()
+    yaw_target = sim.get_yaw() if hasattr(sim, "get_yaw") else 0.0
+    grip_now   = getattr(sim, "get_gripper_opening", lambda: 0.03)()
+    
     # ---- roll out ----
     for t in range(args.steps):
         if c_idx >= len(chunk):
             chunk = request_chunk()
             c_idx = 0
+        a7 = chunk[c_idx]; c_idx += 1
 
-        a7 = chunk[c_idx]
-        c_idx += 1
+        dxyz, dyaw, dgrip = map_7d_delta_to_cdpr5(a7, xyz_bounds, gr_range)
 
-        # map 7D → [xyz,yaw,grip]
-        xyz, yaw, grip = map_7d_to_cdpr5(a7, xyz_bounds, gr_range)
+        # integrate + clamp to workspace
+        xyz_target = xyz_target + dxyz
+        (xlo, xhi), (ylo, yhi), (zlo, zhi) = xyz_bounds
+        xyz_target[0] = np.clip(xyz_target[0], xlo, xhi)
+        xyz_target[1] = np.clip(xyz_target[1], ylo, yhi)
+        xyz_target[2] = np.clip(xyz_target[2], zlo, zhi)
 
-        # apply to sim
-        sim.set_target_position(xyz)
-        if hasattr(sim, "set_yaw"): sim.set_yaw(yaw)
-        if hasattr(sim, "set_gripper"): sim.set_gripper(grip)
+        yaw_target = ((yaw_target + dyaw + np.pi) % (2*np.pi)) - np.pi
+        grip_now = float(np.clip(grip_now + dgrip, gr_range[0], gr_range[1]))
+
+        sim.set_target_position(xyz_target)
+        # sim.set_target_position(np.array([0.0, -0.3, 0.3]))
+        # sim.set_yaw(1.0)
+        # for _ in range(240):
+        #     sim.run_simulation_step(capture_frame=False)
+        if hasattr(sim, "set_yaw"): sim.set_yaw(yaw_target)
+        if hasattr(sim, "set_gripper"): sim.set_gripper(grip_now)
+
         sim.run_simulation_step(capture_frame=True)
-
+    
     # save via your built-ins
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     outdir = Path(sim.output_dir) / f"oft_run_{ts}"

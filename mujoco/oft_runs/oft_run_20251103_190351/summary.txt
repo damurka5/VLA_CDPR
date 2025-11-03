@@ -1,0 +1,9 @@
+CDPR Trajectory Summary
+=======================
+Trajectory: oft_cdpr
+Timestamp: 2025-11-03 19:03:52
+Total frames captured: 120
+Total simulation steps: 120
+Simulation time: 2.00 seconds
+Final EE position: [-0.518 -0.701 0.887]
+Final target position: [-0.800 -0.800 1.200]
