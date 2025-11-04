@@ -144,7 +144,7 @@ def make_placed_object_xml(orig_object_xml: Path, out_xml: Path, prefix: str, po
     tree = ET.parse(orig_object_xml)
     root = tree.getroot()
 
-    # Copy <asset> and absolutize mesh/texture paths (unchanged idea)
+    # --- collect <asset> and absolutize files
     asset_elems = []
     for a in root.findall("asset"):
         a_copy = clone(a)
@@ -153,7 +153,7 @@ def make_placed_object_xml(orig_object_xml: Path, out_xml: Path, prefix: str, po
                 sub.set("file", str((src_dir / sub.get("file")).resolve()))
         asset_elems.append(a_copy)
 
-    # Take first body under any worldbody
+    # take first body under worldbody
     worldbodies = root.findall("worldbody")
     if not worldbodies:
         raise ValueError(f"{orig_object_xml} has no <worldbody> section.")
@@ -164,7 +164,7 @@ def make_placed_object_xml(orig_object_xml: Path, out_xml: Path, prefix: str, po
         raise ValueError(f"{orig_object_xml} has no <body> inside <worldbody>.")
     body_clone = clone(bodies[0])
 
-    # Prefix names to avoid collisions
+    # --- prefix names for body tree (to avoid geom/site/joint clashes)
     NAME_TAGS = {"body", "geom", "site", "joint", "camera", "light"}
     def prefix_names(elem):
         if elem.tag in NAME_TAGS and "name" in elem.attrib:
@@ -173,24 +173,83 @@ def make_placed_object_xml(orig_object_xml: Path, out_xml: Path, prefix: str, po
             prefix_names(child)
     prefix_names(body_clone)
 
-    # Apply pose (MuJoCo wants w x y z)
+    # --- prefix asset names and build remap dicts
+    mesh_map, tex_map, mat_map, skin_map, hf_map = {}, {}, {}, {}, {}
+
+    def maybe_pref(attr_map, old):
+        if old is None:
+            return None
+        new = f"{prefix}_{old}"
+        attr_map[old] = new
+        return new
+
+    for a in asset_elems:
+        for sub in list(a):
+            if "name" in sub.attrib:
+                old = sub.get("name")
+                if sub.tag == "mesh":
+                    sub.set("name", maybe_pref(mesh_map, old))
+                elif sub.tag == "texture":
+                    sub.set("name", maybe_pref(tex_map, old))
+                elif sub.tag == "material":
+                    sub.set("name", maybe_pref(mat_map, old))
+                elif sub.tag == "skin":
+                    sub.set("name", maybe_pref(skin_map, old))
+                elif sub.tag == "hfield":
+                    sub.set("name", maybe_pref(hf_map, old))
+
+    # --- update references *inside assets* (material.texture, skin.texture)
+    for a in asset_elems:
+        for sub in list(a):
+            if sub.tag == "material" and "texture" in sub.attrib:
+                t = sub.get("texture")
+                if t in tex_map:
+                    sub.set("texture", tex_map[t])
+            if sub.tag == "skin" and "texture" in sub.attrib:
+                t = sub.get("texture")
+                if t in tex_map:
+                    sub.set("texture", tex_map[t])
+
+    # --- update references inside the body tree (geom.mesh/material/hfield/skin)
+    def rewrite_body_refs(elem):
+        if elem.tag == "geom":
+            if "mesh" in elem.attrib:
+                m = elem.get("mesh")
+                if m in mesh_map:
+                    elem.set("mesh", mesh_map[m])
+            if "material" in elem.attrib:
+                m = elem.get("material")
+                if m in mat_map:
+                    elem.set("material", mat_map[m])
+            if "hfield" in elem.attrib:
+                h = elem.get("hfield")
+                if h in hf_map:
+                    elem.set("hfield", hf_map[h])
+            if "skin" in elem.attrib:
+                s = elem.get("skin")
+                if s in skin_map:
+                    elem.set("skin", skin_map[s])
+        for ch in list(elem):
+            rewrite_body_refs(ch)
+    rewrite_body_refs(body_clone)
+
+    # --- pose (MuJoCo body.quat wants w x y z)
     body_clone.set("pos", f"{pos[0]} {pos[1]} {pos[2]}")
     wxyz = (float(quat[3]), float(quat[0]), float(quat[1]), float(quat[2]))
     body_clone.set("quat", f"{wxyz[0]} {wxyz[1]} {wxyz[2]} {wxyz[3]}")
 
-    # ✅ If requested, ensure this object is dynamic:
-    #    - add a <freejoint/> if there is no joint anywhere under this body
+    # ensure dynamic if requested
     has_joint = any(elem.tag == "joint" for elem in body_clone.iter())
     if force_dynamic and not has_joint:
         ET.SubElement(body_clone, "freejoint")
 
-    # Build minimal MJCF; also give default density so geoms get mass if needed
+    # --- build minimal MJCF with assets + body
     mj = ET.Element("mujoco")
     comp = ET.SubElement(mj, "compiler"); comp.set("autolimits", "true")
 
     default = ET.SubElement(mj, "default")
     geomdef = ET.SubElement(default, "geom")
-    geomdef.set("density", "1200")  # ~plastic; adjust if you like
+    geomdef.set("density", "1200")
 
     if asset_elems:
         new_asset = ET.SubElement(mj, "asset")
@@ -201,8 +260,10 @@ def make_placed_object_xml(orig_object_xml: Path, out_xml: Path, prefix: str, po
     new_wb = ET.SubElement(mj, "worldbody")
     new_wb.append(body_clone)
 
-    try: ET.indent(mj)
-    except: pass
+    try:
+        ET.indent(mj)
+    except Exception:
+        pass
     ET.ElementTree(mj).write(out_xml, encoding="utf-8", xml_declaration=True)
 
 def build_wrapper_mjcf(scene_xml: Path, cdpr_xml: Path, placed_object_xmls: list[Path], out_xml: Path):

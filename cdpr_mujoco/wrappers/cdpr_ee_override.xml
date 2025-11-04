@@ -78,7 +78,7 @@
       <inertial pos="0 0 0" mass="0.25" diaginertia="0.0003 0.0003 0.0003" />
       <geom name="target_box" type="box" size="0.1 0.1 0.01" rgba="1 0 0 1" friction="1.2 0.01 0.0001" condim="4" />
     </body>
-    <body name="ee_base" pos="0.0 0.0 0.65">
+    <body name="ee_base" pos="0.0 0.0 0.25">
       <joint name="ee_free" type="free" damping="3" armature="0.002" />
       <inertial pos="0 0 0" mass="1.2" diaginertia="0.02 0.02 0.02" />
       <site name="topcenter" pos="0 0 0.08" size="0.006" rgba="0 0 1 1" />
