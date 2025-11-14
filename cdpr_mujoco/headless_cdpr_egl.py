@@ -126,13 +126,77 @@ class HeadlessCDPRSimulation:
         self.act_gripper = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "act_gripper")
 
         # Target object (body + geom). If the geom is unnamed, we’ll find it by body.
-        self.body_target = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_BODY, "target_object")
+        # self.body_target = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_BODY, "target_object")
+        # --- Detect the object body robustly ---
+                # --- Detect the object body robustly ---
+                # --- Detect the object body robustly ---
+        def _detect_object_body(model):
+            """
+            Prefer placed LIBERO objects:
+              - bodies whose name looks like 'p0_<something>', 'p1_<something>', ...
+            Fallbacks:
+              - 'target_object', 'object'
+              - any other FREE-joint non-robot body
+            """
+            robot_prefixes = ("rotor_", "slider_", "ee_", "camera_", "yaw_frame",
+                              "ee_platform", "finger_")
+
+            placed_candidates = []   # (bid, name) for p[0-9]_*
+            free_candidates   = []   # (bid, name) all other free-jointed non-robot
+
+            for bid in range(model.nbody):
+                nm = mj.mj_id2name(model, mj.mjtObj.mjOBJ_BODY, bid)
+                if not nm or nm == "world":
+                    continue
+                if any(nm.startswith(p) for p in robot_prefixes):
+                    continue
+
+                # does it have a FREE joint?
+                jn, ja = model.body_jntnum[bid], model.body_jntadr[bid]
+                has_free = any(model.jnt_type[ja + k] == mj.mjtJoint.mjJNT_FREE
+                               for k in range(jn))
+                if has_free:
+                    free_candidates.append((bid, nm))
+
+                # placed LIBERO objects from cdpr_scene_switcher:
+                # names like 'p0_object', 'p0_ketchup', ...
+                if len(nm) >= 3 and nm[0] == "p" and nm[1].isdigit() and nm[2] == "_":
+                    placed_candidates.append((bid, nm))
+
+            # 1) Prefer placed objects even if they *don’t* have a free joint
+            if placed_candidates:
+                return placed_candidates[0]
+
+            # 2) If no placed objects, try explicit names
+            for name in ("target_object", "object"):
+                bid = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, name)
+                if bid != -1:
+                    return bid, name
+
+            # 3) Last resort: any free-joint non-robot body
+            if free_candidates:
+                return free_candidates[0]
+
+            return -1, None
+
+        self.body_target, self.body_target_name = _detect_object_body(self.model)
+        if self.body_target == -1:
+            # helpful error
+            # import mujoco as mj
+            names = [mj.mj_id2name(self.model, mj.mjtObj.mjOBJ_BODY, i) for i in range(self.model.nbody)]
+            raise RuntimeError(f"Could not detect object body. Bodies: {names[:30]}{' ...' if len(names)>30 else ''}")
+
         try:
             self.geom_target = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_GEOM, "target_box")
         except Exception:
             # Fallback: first geom belonging to target body
             self.geom_target = int(np.where(self.model.geom_bodyid == self.body_target)[0][0])
         
+        # DEBUG: check object orientation
+        if self.body_target >= 0:
+            xquat = self.data.xquat[self.body_target]  # [w, x, y, z] in world
+            print(f"[debug] object body '{self.body_target_name}' world xquat={xquat}")
+            
         self._setup_offscreen_rendering()
         mj.mj_forward(self.model, self.data)
         # Seed target to current EE pose (so your higher-level controller doesn’t pull elsewhere)
@@ -287,17 +351,46 @@ class HeadlessCDPRSimulation:
 
     def get_end_effector_position(self):
         return self.data.xpos[self.body_ee].copy()
+    
+    def get_object_body_name(self):
+        return getattr(self, "body_target_name", None)
+
+    def get_object_position(self):
+        if getattr(self, "body_target", -1) == -1:
+            raise RuntimeError("Object body not set")
+        return self.data.xpos[self.body_target].copy()
+
+    # Backward-compat alias (so old code still works)
+    def get_target_position(self):
+        return self.get_object_position()
 
     def get_target_position(self):
         return self.data.xpos[self.body_target].copy()
 
-    def set_gripper(self, opening_m):
-        opening = float(np.clip(opening_m, 0.0, 0.06))  # your bigger range
-        self.data.ctrl[self.act_gripper] = opening
+    # def set_gripper(self, opening_m):
+    #     opening = float(np.clip(opening_m, 0.0, 0.06))  # your bigger range
+    #     self.data.ctrl[self.act_gripper] = opening
 
-    def open_gripper(self):  self.set_gripper(0.06)
-    def close_gripper(self): self.set_gripper(0.0)
+    # def open_gripper(self):  self.set_gripper(0.06)
+    # def close_gripper(self): self.set_gripper(0.0)
 
+    def set_gripper(self, open_fraction: float):
+        """
+        open_fraction = 0.0 -> fully CLOSED
+        open_fraction = 1.0 -> fully OPEN
+        """
+        # actuator_ctrlrange is [min, max] allowed ctrl for this actuator
+        ctrl_min, ctrl_max = self.model.actuator_ctrlrange[self.act_gripper]
+        open_fraction = float(np.clip(open_fraction, 0.0, 1.0))
+        u = ctrl_min + open_fraction * (ctrl_max - ctrl_min)
+        self.data.ctrl[self.act_gripper] = u
+
+    def open_gripper(self):
+        self.set_gripper(1.0)
+
+    def close_gripper(self):
+        self.set_gripper(0.0)
+    
     def set_yaw(self, yaw_rad):
         self.data.ctrl[self.act_yaw] = float(np.clip(yaw_rad, -np.pi, np.pi))
     
