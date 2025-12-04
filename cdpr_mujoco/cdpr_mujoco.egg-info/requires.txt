@@ -1,4 +1,0 @@
-numpy
-mujoco>=3.0.0
-imageio
-opencv-python

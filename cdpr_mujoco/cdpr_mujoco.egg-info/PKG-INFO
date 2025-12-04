@@ -1,9 +1,0 @@
-Metadata-Version: 2.4
-Name: cdpr-mujoco
-Version: 0.1.0
-Summary: MuJoCo simulation and control components for the VLA CDPR robot
-Requires-Python: >=3.9
-Requires-Dist: numpy
-Requires-Dist: mujoco>=3.0.0
-Requires-Dist: imageio
-Requires-Dist: opencv-python

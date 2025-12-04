@@ -672,6 +672,33 @@ class HeadlessCDPRSimulation:
         
         print(f"Results saved to: {trajectory_dir}")
     
+    # --- NEW: helper for normalized delta actions ---
+    def _compute_normalized_delta_actions(self, actions_abs: np.ndarray) -> np.ndarray:
+        """
+        Convert absolute actions [x, y, z, yaw, grip] (T, 5) into
+        normalized deltas in [-1, 1] with shape (T-1, 5).
+        """
+
+        actions_abs = np.asarray(actions_abs, dtype=np.float32)
+        if actions_abs.ndim != 2 or actions_abs.shape[1] != 5:
+            raise ValueError(f"Expected actions_abs shape (T, 5), got {actions_abs.shape}")
+
+        # Scaling factors (tune as needed; keep consistent with your training config)
+        k_xyz  = 0.05   # meters per normalized unit (x, y, z)
+        k_yaw  = 0.25   # radians per normalized unit (yaw)
+        k_grip = 1.0    # grip is assumed to already be in [-1, 1]
+
+        scales = np.array([k_xyz, k_xyz, k_xyz, k_yaw, k_grip], dtype=np.float32)
+
+        # raw deltas between consecutive timesteps: (T-1, 5)
+        deltas = actions_abs[1:] - actions_abs[:-1]
+
+        # normalize + clip to [-1, 1]
+        deltas_norm = deltas / scales[None, :]
+        deltas_norm = np.clip(deltas_norm, -1.0, 1.0)
+
+        return deltas_norm.astype(np.float32)
+    
     def save_video(self, frames, filepath, fps=30):
         if not frames:
             return
@@ -681,20 +708,109 @@ class HeadlessCDPRSimulation:
                 writer.append_data(frame)
     
     def save_trajectory_data(self, filepath):
-        """Save trajectory data as numpy file"""
+        """Save trajectory data (.npz) including:
+        - original observables (timestamp, ee_position, ...)
+        - absolute actions (5D)
+        - normalized delta actions (5D in [-1,1])
+        - task_description (language string per step)
+        """
+
         if not self.trajectory_data:
             return
-            
+
+        import numpy as np
+
+        # -----------------------------
+        # 1) Collect base data as before
+        # -----------------------------
         trajectory_dict = {}
-        
-        # Extract arrays from trajectory data
-        arrays_to_save = ['timestamp', 'ee_position', 'target_position', 
-                         'slider_positions', 'cable_lengths', 'control_signals']
-        
+
+        arrays_to_save = [
+            'timestamp',
+            'ee_position',
+            'target_position',
+            'slider_positions',
+            'cable_lengths',
+            'control_signals',
+        ]
+
         for key in arrays_to_save:
             if key in self.trajectory_data[0]:
-                trajectory_dict[key] = np.array([data[key] for data in self.trajectory_data])
-        
+                trajectory_dict[key] = np.array(
+                    [step[key] for step in self.trajectory_data]
+                )
+
+        T = len(self.trajectory_data)
+        if T < 2:
+            # Not enough steps to form deltas; still save what we have
+            np.savez(filepath, **trajectory_dict)
+            return
+
+        # ----------------------------------------------------------
+        # 2) Extract ABSOLUTE actions from control_signals
+        # ----------------------------------------------------------
+        control = trajectory_dict.get("control_signals")
+        if control is None:
+            raise RuntimeError("trajectory_data has no 'control_signals', cannot compute actions.")
+
+        control = np.asarray(control, dtype=np.float32)
+
+        if control.ndim != 2 or control.shape[1] < 5:
+            raise ValueError(
+                f"'control_signals' expected shape (T,>=5), got {control.shape}"
+            )
+
+        # Interpret first 5 dims as [x, y, z, yaw, grip]
+        actions_abs = control[:, :5]        # (T,5)
+        trajectory_dict["actions_abs"] = actions_abs
+
+        # ----------------------------------------------------------
+        # 3) Compute normalized delta actions
+        # ----------------------------------------------------------
+        # Scaling constants (tune if needed; keep consistent with training config)
+        k_xyz  = 0.05   # meters per normalized unit
+        k_yaw  = 0.25   # radians per normalized unit
+        k_grip = 1.0    # grip assumed [-1,1]
+
+        scales = np.array([k_xyz, k_xyz, k_xyz, k_yaw, k_grip], dtype=np.float32)
+
+        deltas = actions_abs[1:] - actions_abs[:-1]   # (T-1, 5)
+
+        deltas_norm = deltas / scales[None, :]
+        deltas_norm = np.clip(deltas_norm, -1.0, 1.0).astype(np.float32)
+
+        trajectory_dict["actions_delta_norm"] = deltas_norm  # (T-1, 5)
+
+        T_delta = deltas_norm.shape[0]
+
+        # ----------------------------------------------------------
+        # 4) Align observation arrays to length T-1
+        # ----------------------------------------------------------
+        for key in arrays_to_save:
+            if key in trajectory_dict:
+                data = trajectory_dict[key]
+                if len(data) == T:
+                    trajectory_dict[key] = data[:T_delta]
+
+        # ----------------------------------------------------------
+        # 5) Add language as task_description per-step (for RLDS)
+        # ----------------------------------------------------------
+        # meta_dataset.json expects: "language": "observation/task_description"
+        # Here we store 'task_description' so the RLDS builder can map it to that.
+        if hasattr(self, "language_instruction"):
+            lang = self.language_instruction
+        else:
+            lang = ""
+
+        # one string per step (T-1)
+        trajectory_dict["task_description"] = np.array(
+            [lang] * T_delta,
+            dtype=object
+        )
+
+        # ----------------------------------------------------------
+        # 6) Save final npz
+        # ----------------------------------------------------------
         np.savez(filepath, **trajectory_dict)
     
     def save_summary(self, trajectory_dir, trajectory_name):
@@ -709,6 +825,8 @@ class HeadlessCDPRSimulation:
             f.write(f"Total frames captured: {len(self.overview_frames)}\n")
             f.write(f"Total simulation steps: {len(self.trajectory_data)}\n")
             f.write(f"Simulation time: {self.data.time:.2f} seconds\n")
+            if hasattr(self, "language_instruction"):
+                f.write(f"language_instruction: {self.language_instruction}\n")
             if self.trajectory_data:
                 f.write(f"Final EE position: {self.trajectory_data[-1]['ee_position']}\n")
                 f.write(f"Final target position: {self.trajectory_data[-1]['target_position']}\n")

@@ -29,9 +29,17 @@ from headless_cdpr_egl import HeadlessCDPRSimulation
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent  # repo/
+# LIBERO_ASSETS = REPO / "LIBERO" / "libero" / "libero" / "assets"
+# SCENES_DIR = LIBERO_ASSETS / "scenes"
+# OBJECTS_DIR = LIBERO_ASSETS / "stable_hope_objects"
+
 LIBERO_ASSETS = REPO / "LIBERO" / "libero" / "libero" / "assets"
 SCENES_DIR = LIBERO_ASSETS / "scenes"
-OBJECTS_DIR = LIBERO_ASSETS / "stable_hope_objects"
+
+# --- NEW: two object roots ---
+OBJECTS_DIR_MAIN  = LIBERO_ASSETS / "stable_hope_objects"      # sauces, milk, etc.
+OBJECTS_DIR_EXTRA = LIBERO_ASSETS / "stable_scanned_objects"   # bowls, plates, basket, ...
+OBJECTS_DIRS = [OBJECTS_DIR_MAIN, OBJECTS_DIR_EXTRA]
 
 CDPR_XML = HERE / "cdpr.xml"
 
@@ -123,18 +131,32 @@ def find_scene_xml(scene_name: str) -> Path:
     return cand
 
 def find_object_xml(object_name: str) -> Path:
-    # many objects live under: stable_hope_objects/<name>/<name>.xml
-    cand = OBJECTS_DIR / object_name / f"{object_name}.xml"
-    if cand.exists():
-        return cand
-    # fallback: first xml under dir
-    d = OBJECTS_DIR / object_name
-    xmls = list(d.glob("*.xml"))
-    if not xmls:
-        raise FileNotFoundError(f"Object '{object_name}' has no .xml in {d}")
-    return xmls[0]
+    """
+    Search for <object_name>.xml under both stable_hope_objects and stable_scanned_objects.
+    """
+    for root in OBJECTS_DIRS:
+        d = root / object_name
+        cand = d / f"{object_name}.xml"
+        if cand.exists():
+            return cand
+        # fallback: first xml under dir, if any
+        if d.exists():
+            xmls = list(d.glob("*.xml"))
+            if xmls:
+                return xmls[0]
 
-def make_placed_object_xml(orig_object_xml: Path, out_xml: Path, prefix: str, pos, quat, force_dynamic=False):
+    roots_str = ", ".join(str(r) for r in OBJECTS_DIRS)
+    raise FileNotFoundError(
+        f"Object '{object_name}' not found under any of: {roots_str}"
+    )
+
+def make_placed_object_xml(orig_object_xml: Path,
+                           out_xml: Path,
+                           prefix: str,
+                           pos,
+                           quat,
+                           force_dynamic: bool = False,
+                           logical_name: str | None = None):
     import xml.etree.ElementTree as ET
 
     def clone(elem):
@@ -163,6 +185,8 @@ def make_placed_object_xml(orig_object_xml: Path, out_xml: Path, prefix: str, po
     if not bodies:
         raise ValueError(f"{orig_object_xml} has no <body> inside <worldbody>.")
     body_clone = clone(bodies[0])
+    if logical_name is not None:
+        body_clone.set("name", logical_name)
 
     # --- prefix names for body tree (to avoid geom/site/joint clashes)
     NAME_TAGS = {"body", "geom", "site", "joint", "camera", "light"}
@@ -323,8 +347,13 @@ def main():
                 help="Write final wrapper MJCF to this path (kept). If unset, uses a temp dir.")
     ap.add_argument("--keep", action="store_true",
                 help="Don’t delete the temp working directory (for debugging).")
-
+    ap.add_argument("--build_only", action="store_true",
+                help="Only build wrapper MJCF and exit (no demo, no videos).")
+    
     args = ap.parse_args()
+    
+    # temp workspace
+    tmpdir = Path(tempfile.mkdtemp(prefix="cdpr_scene_", dir=str(HERE)))
 
     # Where to write the final wrapper
     if args.wrapper_out:
@@ -339,9 +368,6 @@ def main():
     scene_xml = find_scene_xml(args.scene)
     if not CDPR_XML.exists():
         raise FileNotFoundError(f"CDPR XML not found at {CDPR_XML}")
-
-    # temp workspace
-    tmpdir = Path(tempfile.mkdtemp(prefix="cdpr_scene_", dir=str(HERE)))
 
     # Scene (z-shift if needed)
     if abs(args.scene_z) > 1e-6:
@@ -376,10 +402,16 @@ def main():
         placed_xmls = []
         for idx, (name, obj_xml, pos, quat) in enumerate(placements):
             placed_path = gen_base / f"placed_{idx}_{name}.xml"
-            make_placed_object_xml(obj_xml, placed_path, prefix=f"p{idx}", pos=pos, quat=quat,
-                                force_dynamic=args.object_dynamic)
+            make_placed_object_xml(
+                obj_xml,
+                placed_path,
+                prefix=f"p{idx}",
+                pos=pos,
+                quat=quat,
+                force_dynamic=args.object_dynamic,
+                logical_name=name,        # NEW: ensures body name reflects object_name
+            )
             placed_xmls.append(placed_path)
-
 
         wrapper_xml = (Path(args.wrapper_out).resolve()
                if args.wrapper_out else (tmpdir / "cdpr_scene_wrapper.xml"))
@@ -387,6 +419,11 @@ def main():
 
         print(f"✅ Built wrapper: {wrapper_xml}")
         print(f"   Includes {len(placed_xmls)} object(s).")
+        
+        if args.build_only:
+            # Do not run a demo, do not initialize the simulator here.
+            print(f"✅ Wrapper built (build_only). Path: {wrapper_xml}")
+            return
 
         # Only delete tmpdir if we used it for everything
         if not args.wrapper_out:
