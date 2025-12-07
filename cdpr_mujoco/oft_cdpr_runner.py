@@ -4,427 +4,504 @@ from pathlib import Path
 from datetime import datetime
 import numpy as np
 from PIL import Image
-import numpy as np
+
 import mujoco as mj
+import torch
+from safetensors.torch import load_file
+import json
 
 # ---- repo local import of your sim ----
 HERE = Path(__file__).resolve().parent
 sys.path.append(str(HERE))
 from headless_cdpr_egl import HeadlessCDPRSimulation  # your class
 
-import sys, os
-# Try to locate LIBERO if not installed as a package
-if "libero" not in sys.modules:
-    candidate = "/root/repo/LIBERO"
-    if os.path.isdir(candidate):
-        sys.path.append(candidate)
+# After sys.path.append for openvla_path / libero_path and BEFORE you construct the model:
+from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 
+# ---- CDPR monkey-patch: disable RLDS action unnormalization ----
+import types
 
-# ---- openvla-oft imports (run in openvla-oft env) ----
-from experiments.robot.libero.run_libero_eval import GenerateConfig
-from experiments.robot.openvla_utils import (
-    get_action_head, get_processor, get_proprio_projector, get_vla, get_vla_action
-)
-from prismatic.vla.constants import NUM_ACTIONS_CHUNK  # chunk length
+try:
+    from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
+except ImportError:
+    OpenVLAForActionPrediction = None
 
-import itertools
-import copy
+try:
+    from prismatic.models.vlas.openvla import OpenVLA
+except ImportError:
+    OpenVLA = None
 
-# ---------- auto-orient helpers ----------
-
-def guess_goal_xy(sim, override=None):
-    if override is not None:
-        return np.array(override[:2], dtype=float)
-
-    # Prefer placed LIBERO objects (prefixed in your scene_switcher as p0_, p1_, ...)
-    names = []
-    for bid in range(sim.model.nbody):
-        nm = mj.mj_id2name(sim.model, mj.mjtObj.mjOBJ_BODY, bid)
-        names.append(nm if nm is not None else "")
-    cand_ids = [i for i,n in enumerate(names)
-                if n.startswith(("p0_", "p1_", "p2_", "p3_", "p4_"))]
-
-    if cand_ids:
-        return sim.data.xpos[cand_ids[0], :2].copy()
-
-    # Fallback: your red block ("target_object")
-    try:
-        return sim.get_target_position()[:2].copy()
-    except:
-        # Fallback to current EE XY if nothing else
-        return sim.get_end_effector_position()[:2].copy()
-
-def snapshot(sim):
-    # capture full sim state + your controller target
-    return {
-        "qpos": sim.data.qpos.copy(),
-        "qvel": sim.data.qvel.copy(),
-        "ctrl": sim.data.ctrl.copy(),
-        "target_pos": sim.target_pos.copy() if hasattr(sim, "target_pos") else None,
-    }
-
-def restore(sim, snap):
-    sim.data.qpos[:] = snap["qpos"]
-    sim.data.qvel[:] = snap["qvel"]
-    sim.data.ctrl[:] = snap["ctrl"]
-    if snap["target_pos"] is not None and hasattr(sim, "target_pos"):
-        sim.target_pos = snap["target_pos"].copy()
-    mj.mj_forward(sim.model, sim.data)  # recompute derived state
-
-def apply_mapping(vec3, perm, sign):
-    v = np.array(vec3, dtype=float)
-    v = v[list(perm)]
-    return v * np.array(sign, dtype=float)
-
-def probe_mapping(sim, acts, perm, sign, xyz_bounds, k_xyz=0.35, steps=25, goal_xy_override=None):
-    snap0 = snapshot(sim)
-    xyz_t = sim.get_end_effector_position().copy()
-    goal_xy = guess_goal_xy(sim, goal_xy_override)
-
-    (xlo,xhi), (ylo,yhi), (zlo,zhi) = xyz_bounds
-    d0 = np.linalg.norm(xyz_t[:2] - goal_xy)
-
-    for i in range(min(steps, len(acts))):
-        a = acts[i]
-        dxyz_raw = np.array([np.clip(a[0], -1, 1),
-                             np.clip(a[1], -1, 1),
-                             np.clip(a[2], -1, 1)], dtype=float) * k_xyz
-        dxyz = apply_mapping(dxyz_raw, perm, sign)
-
-        xyz_t = xyz_t + dxyz
-        xyz_t[0] = np.clip(xyz_t[0], xlo, xhi)
-        xyz_t[1] = np.clip(xyz_t[1], ylo, yhi)
-        xyz_t[2] = np.clip(xyz_t[2], zlo, zhi)
-
-        sim.set_target_position(xyz_t)
-        # a couple of inner steps so plant follows the new target
-        for _ in range(2):
-            sim.run_simulation_step(capture_frame=False)
-
-    dT = np.linalg.norm(sim.get_end_effector_position()[:2] - goal_xy)
-    restore(sim, snap0)
-    return d0 - dT  # positive means "moved closer"
-
-def auto_orient_actions(sim, request_chunk_fn, xyz_bounds):
-    import itertools
-    acts = np.array(request_chunk_fn(), dtype=float)
-    if acts.ndim != 2 or acts.shape[1] < 7:
-        return ((0,1,2), (1,1,1))  # fallback
-
-    perms = list(itertools.permutations([0,1,2], 3))
-    signs = [(sx,sy,sz) for sx in (1,-1) for sy in (1,-1) for sz in (1,-1)]
-
-    best = ((0,1,2),(1,1,1)); best_gain = -1e9
-    for p in perms:
-        for s in signs:
-            gain = probe_mapping(sim, acts, p, s, xyz_bounds, k_xyz=0.35, steps=20)
-            if gain > best_gain:
-                best, best_gain = (p,s), gain
-
-    print(f"[auto-orient] picked perm={best[0]} sign={best[1]} (gain={best_gain:.3f})")
-    return best
-
-# ---------- mapping & utils ----------
-
-def clamp(v, lo, hi):
-    return float(max(lo, min(hi, v)))
-
-def norm01(v, lo, hi): 
-    return (np.clip(v, lo, hi) - lo) / (hi - lo + 1e-9)
-
-def norm11_from_bounds(v, lo, hi):
-    return 2.0 * norm01(v, lo, hi) - 1.0
-
-def _maybe_unnorm_1d(val, lo, hi):
-    # if it looks normalized, map from [-1,1] -> [lo,hi]
-    if -1.2 <= val <= 1.2:
-        return lo + 0.5*(val+1.0)*(hi-lo)
-    return clamp(val, lo, hi)
-
-def map_7d_to_cdpr5(act7, xyz_bounds, gripper_range):
-    a = np.array(act7, dtype=float).flatten()
-    if a.size < 7:
-        a = np.pad(a, (0, 7-a.size))
-
-    (xlo, xhi), (ylo, yhi), (zlo, zhi) = xyz_bounds
-
-    x = _maybe_unnorm_1d(a[0], xlo, xhi)
-    y = _maybe_unnorm_1d(a[1], ylo, yhi)
-    z = _maybe_unnorm_1d(a[2], zlo, zhi)
-
-    yaw_raw = float(a[3])
-    yaw = yaw_raw if abs(yaw_raw) > 1.2 else yaw_raw * np.pi
-    yaw = (yaw + np.pi) % (2*np.pi) - np.pi
-
-    g = float(a[6])
-    if -1.2 <= g <= 1.2:
-        g = 0.5*(g+1.0)  # [0,1]
-    g = clamp(g, 0.0, 1.0)
-    gr_lo, gr_hi = gripper_range
-    grip = gr_lo + g*(gr_hi-gr_lo)
-
-    return np.array([x, y, z]), yaw, grip
-
-
-# def map_7d_to_cdpr5(act7, xyz_bounds, gripper_range):
-#     """
-#     act7: [x,y,z,yaw,pitch,roll,gripper]
-#     returns: xyz(3), yaw(float), grip_opening_m(float)
-#     """
-#     a = np.array(act7, dtype=float).flatten()
-#     if a.size < 7:  # pad if needed
-#         a = np.pad(a, (0, 7 - a.size))
-
-#     # assume OpenVLA-OFT emits in WORLD units already; if normalized, add a remap here
-#     (xlo, xhi), (ylo, yhi), (zlo, zhi) = xyz_bounds
-#     x = clamp(a[0], xlo, xhi)
-#     y = clamp(a[1], ylo, yhi)
-#     z = clamp(a[2], zlo, zhi)
-
-#     # yaw: allow either radians or [-1,1] normalized; if looks small, scale by pi
-#     yaw_raw = float(a[3])
-#     yaw = yaw_raw if abs(yaw_raw) > 1.2 else yaw_raw * np.pi
-#     # wrap to [-pi, pi]
-#     yaw = (yaw + np.pi) % (2*np.pi) - np.pi
-
-#     # gripper: assume normalized [0..1] or [-1..1] → meters
-#     g = float(a[6])
-#     if -1.2 <= g <= 1.2:
-#         g = 0.5 * (g + 1.0)  # map [-1,1]→[0,1]
-#     g = clamp(g, 0.0, 1.0)
-#     gr_lo, gr_hi = gripper_range
-#     grip = gr_lo + g * (gr_hi - gr_lo)
-
-#     return np.array([x, y, z]), yaw, grip
-
-def map_7d_delta_to_cdpr5(act7, xyz_bounds, gripper_range,
-                          k_xyz=0.25, k_yaw=np.pi*0.20, k_grip=0.5,
-                          max_step_xyz=0.08, max_step_yaw=np.deg2rad(20), max_step_grip=0.02):
+def cdpr_unnormalize_actions(self, normalized_actions, unnorm_key=None):
     """
-    Interpret act7 as *deltas* in normalized [-1,1] space:
-      dx,dy,dz in [-1,1]  -> meters via k_xyz (then clipped to max_step_xyz)
-      dyaw in [-1,1]      -> radians via k_yaw (clipped)
-      grip in [-1,1] or [0,1] -> delta open amount (meters)
-    Returns (delta_xyz, delta_yaw, delta_grip).
+    Override for *_unnormalize_actions.
+
+    For CDPR continuous 5-DoF actions, we DO NOT want RLDS-based un-normalization
+    (which assumes 7-D actions and causes shape mismatches). The CDPR action head
+    already outputs metric deltas, so just return them as-is.
     """
-    a = np.array(act7, dtype=float).flatten()
-    if a.size < 7:
-        a = np.pad(a, (0, 7 - a.size))
-    # normalize plausible inputs
-    dx = float(np.clip(a[0], -1, 1)) * k_xyz
-    dy = float(np.clip(a[1], -1, 1)) * k_xyz
-    dz = float(np.clip(a[2], -1, 1)) * k_xyz
-    dyaw = float(np.clip(a[3], -1, 1)) * k_yaw
+    return normalized_actions
 
-    # gripper: allow [-1,1] → delta-fraction of range
-    g = float(a[6])
-    if -1.2 <= g <= 1.2:
-        g = 0.5 * (g)  # scale down; feel free to tune
-    dgrip = g * (gripper_range[1] - gripper_range[0]) * k_grip
+# Patch class-level methods (covers models constructed AFTER this)
+if OpenVLAForActionPrediction is not None:
+    OpenVLAForActionPrediction._unnormalize_actions = cdpr_unnormalize_actions
+    print("🔧 Patched OpenVLAForActionPrediction._unnormalize_actions (class-level).")
 
-    # per-step clamps (safety/comfort)
-    dx = float(np.clip(dx, -max_step_xyz, max_step_xyz))
-    dy = float(np.clip(dy, -max_step_xyz, max_step_xyz))
-    dz = float(np.clip(dz, -max_step_xyz, max_step_xyz))
-    dyaw = float(np.clip(dyaw, -max_step_yaw, max_step_yaw))
-    dgrip = float(np.clip(dgrip, -max_step_grip, max_step_grip))
+if OpenVLA is not None:
+    OpenVLA._unnormalize_actions = cdpr_unnormalize_actions
+    print("🔧 Patched OpenVLA._unnormalize_actions (class-level).")
 
-    return np.array([dx, dy, dz]), dyaw, dgrip
+# Add OpenVLA-OFT to path
+openvla_path = "/root/repo/openvla-oft"
+if openvla_path not in sys.path:
+    sys.path.append(openvla_path)
+
+# Add LIBERO to path
+libero_path = "/root/repo/LIBERO"
+if libero_path not in sys.path:
+    sys.path.append(libero_path)
+
+print("🔍 Importing OpenVLA-OFT modules...")
+try:
+    from experiments.robot.libero.run_libero_eval import GenerateConfig
+    from experiments.robot.openvla_utils import (
+        get_action_head, get_processor, get_proprio_projector, get_vla, get_vla_action,
+        _load_dataset_stats,
+    )
+    from prismatic.vla.constants import NUM_ACTIONS_CHUNK
+    print("✅ Successfully imported OpenVLA-OFT modules")
+except ImportError as e:
+    print(f"❌ Error importing OpenVLA-OFT modules: {e}")
+    print("Trying alternative import approach...")
+    import importlib.util
+
+    # Import GenerateConfig
+    spec = importlib.util.spec_from_file_location(
+        "GenerateConfig",
+        "/root/repo/openvla-oft/experiments/robot/libero/run_libero_eval.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    GenerateConfig = module.GenerateConfig
+
+    # Import openvla_utils
+    spec = importlib.util.spec_from_file_location(
+        "openvla_utils",
+        "/root/repo/openvla-oft/experiments/robot/openvla_utils.py",
+    )
+    utils_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(utils_module)
+    get_action_head = utils_module.get_action_head
+    get_processor = utils_module.get_processor
+    get_proprio_projector = utils_module.get_proprio_projector
+    get_vla = utils_module.get_vla
+    get_vla_action = utils_module.get_vla_action
+
+    from prismatic.vla.constants import NUM_ACTIONS_CHUNK
+    print("✅ Successfully imported with alternative approach")
+
+from peft import PeftModel
 
 
-# def make_observation(sim, task_text: str):
-#     """
-#     Build OFT-style observation dict.
-#     Images must be np.uint8 HxWx3 (RGB). Proprio is 8-D for the pretrained projector:
-#       [ee_x, ee_y, ee_z, yaw, pitch=0, roll=0, dummy=0, gripper]
-#     """
-#     # ---- images as np.uint8 arrays (RGB) ----
-#     full_rgb  = sim.capture_frame(sim.overview_cam, "overview")   # already HxWx3 uint8
-#     wrist_rgb = sim.capture_frame(sim.ee_cam, "ee_camera")
-#     # ensure dtype and contiguous memory
-#     full_rgb  = np.ascontiguousarray(full_rgb, dtype=np.uint8)
-#     wrist_rgb = np.ascontiguousarray(wrist_rgb, dtype=np.uint8)
+# ---------- Observation and action helpers (5-DoF) ----------
 
-#     # ---- proprio (8-D expected by OFT checkpoints) ----
-#     ee   = sim.get_end_effector_position().astype(np.float32)  # (3,)
-#     yaw  = float(getattr(sim, "get_yaw", lambda: 0.0)())
-#     grip = float(getattr(sim, "get_gripper_opening", lambda: 0.03)())
-#     proprio = np.array([ee[0], ee[1], ee[2], yaw, 0.0, 0.0, 0.0, grip], dtype=np.float32)
+def make_observation(sim, task_text, gripper_range=(0.0, 0.06)):
+    """
+    Build observation for OpenVLA-OFT (CDPR, 5-DoF).
 
-#     obs = {
-#         "full_image":  full_rgb,   # <- NumPy, not PIL
-#         "wrist_image": wrist_rgb,  # <- NumPy, not PIL
-#         "state": proprio,
-#         "task_description": task_text,
-#     }
-#     return obs, proprio.size
+    State is 5-D absolute:
+      [x, y, z, yaw, grip]
 
-def make_observation(sim, task_text, xyz_bounds=((-0.755, 0.755),(-0.755, 0.755),(0, 1.309)), gripper_range=(0, 1), normalize_proprio=True):
-    full_rgb  = sim.capture_frame(sim.overview_cam, "overview")
+    where:
+      - x,y,z in world meters (like in your dataset)
+      - yaw in radians
+      - grip is physical opening mapped to [0,1]
+    """
+    full_rgb = sim.capture_frame(sim.overview_cam, "overview")
     wrist_rgb = sim.capture_frame(sim.ee_cam, "ee_camera")
-    ee   = sim.get_end_effector_position().astype(np.float32)
-    yaw  = float(sim.get_yaw()) if hasattr(sim, "get_yaw") else 0.0
-    grip = float(getattr(sim, "get_gripper_opening", lambda: 0.03)())
 
-    if normalize_proprio:
-        (xlo, xhi), (ylo, yhi), (zlo, zhi) = xyz_bounds
-        ee_n = np.array([
-            norm11_from_bounds(ee[0], xlo, xhi),
-            norm11_from_bounds(ee[1], ylo, yhi),
-            norm11_from_bounds(ee[2], zlo, zhi),
-            np.clip(yaw/np.pi, -1, 1),   # yaw in [-pi,pi] → [-1,1]
-            0.0, 0.0, 0.0,
-            norm11_from_bounds(grip, gripper_range[0], gripper_range[1]),
-        ], dtype=np.float32)
-        proprio = ee_n
-    else:
-        proprio = np.array([ee[0], ee[1], ee[2], yaw, 0,0,0, grip], dtype=np.float32)
+    ee = sim.get_end_effector_position().astype(np.float32)
+    yaw = float(sim.get_yaw()) if hasattr(sim, "get_yaw") else 0.0
+    grip_phys = float(getattr(sim, "get_gripper_opening", lambda: 0.03)())
 
-    obs = {"full_image": full_rgb, "wrist_image": wrist_rgb, "state": proprio,
-           "task_description": task_text}
-    return obs, proprio.size
+    g_lo, g_hi = gripper_range
+    grip_norm = (grip_phys - g_lo) / (g_hi - g_lo + 1e-9)
+    grip_norm = float(np.clip(grip_norm, 0.0, 1.0))
+
+    state = np.array(
+        [ee[0], ee[1], ee[2], yaw, grip_norm],
+        dtype=np.float32,
+    )
+
+    obs = {
+        "full_image": np.ascontiguousarray(full_rgb),
+        "wrist_image": np.ascontiguousarray(wrist_rgb),
+        "state": state,
+        "task_description": task_text,
+    }
+    return obs, state.size
 
 
-# ---------- runner ----------
+def map_action_to_cdpr(
+    act5,
+    xyz_bounds,
+    gripper_range,
+    current_xyz,
+    current_yaw,
+    current_grip_phys,
+    max_xyz_step=0.05,
+    max_yaw_step=np.pi * 0.1,
+    max_grip_step=0.02,
+):
+    """
+    Map 5D action [Δx, Δy, Δz, Δyaw, Δgrip_phys] to CDPR target state.
+
+    We assume get_vla_action already returns *unnormalized* deltas in
+    the same units as your training data (meters, radians, grip units).
+    """
+    a = np.array(act5, dtype=float).flatten()
+    if a.size < 5:
+        a = np.pad(a, (0, 5 - a.size))
+
+    dx, dy, dz, dyaw, dgrip = a
+
+    # Clamp deltas for safety
+    dx = float(np.clip(dx, -max_xyz_step, max_xyz_step))
+    dy = float(np.clip(dy, -max_xyz_step, max_xyz_step))
+    dz = float(np.clip(dz, -max_xyz_step, max_xyz_step))
+    dyaw = float(np.clip(dyaw, -max_yaw_step, max_yaw_step))
+    dgrip = float(np.clip(dgrip, -max_grip_step, max_grip_step))
+
+    # Compute targets
+    target_xyz = current_xyz + np.array([dx, dy, dz], dtype=float)
+    target_yaw = current_yaw + dyaw
+    target_grip_phys = current_grip_phys + dgrip
+
+    # Clamp XYZ to bounds
+    (xlo, xhi), (ylo, yhi), (zlo, zhi) = xyz_bounds
+    target_xyz[0] = np.clip(target_xyz[0], xlo, xhi)
+    target_xyz[1] = np.clip(target_xyz[1], ylo, yhi)
+    target_xyz[2] = np.clip(target_xyz[2], zlo, zhi)
+
+    # Wrap yaw into [-pi, pi]
+    target_yaw = ((target_yaw + np.pi) % (2 * np.pi)) - np.pi
+
+    # Clamp gripper to physical range
+    g_lo, g_hi = gripper_range
+    target_grip_phys = float(np.clip(target_grip_phys, g_lo, g_hi))
+
+    return target_xyz, target_yaw, target_grip_phys
+
+
+# ---------- Main runner ----------
 
 def main():
     import argparse
-    ap = argparse.ArgumentParser("OpenVLA-OFT → CDPR runner")
-    ap.add_argument("--xml", required=True, help="Wrapper MJCF (scene+cdpr+objects).")
-    ap.add_argument("--ckpt", default="moojink/openvla-7b-oft-finetuned-libero-spatial",
-                    help="OpenVLA-OFT checkpoint id")
-    # ap.add_argument("--center_crop", type=bool, default=True)
-    ap.add_argument("--center_crop", dest="center_crop", action="store_true")
-    ap.add_argument("--no_center_crop", dest="center_crop", action="store_false")
-    ap.set_defaults(center_crop=True)
-    ap.add_argument("--steps", type=int, default=600)
-    ap.add_argument("--chunk_replan", type=int, default=NUM_ACTIONS_CHUNK,
-                    help="Replan each chunk: request a new action chunk every N steps.")
-    ap.add_argument("--instr", default="Pick up the orange juice, then hover.")
-    # workspace & gripper bounds (adjust to your setup)
-    ap.add_argument("--x_bound", default="-0.8,0.8")
-    ap.add_argument("--y_bound", default="-0.8,0.8")
-    ap.add_argument("--z_bound", default="0.10,1.20")
-    ap.add_argument("--grip_range", default="0.0,0.06")
+
+    ap = argparse.ArgumentParser("OpenVLA-OFT CDPR Runner")
+    ap.add_argument("--xml", required=True, help="Wrapper MJCF")
+
+    # Accept both --base-ckpt and --ckpt
+    ap.add_argument(
+        "--base-ckpt",
+        "--ckpt",
+        dest="base_ckpt",
+        default="moojink/openvla-7b-oft-finetuned-libero-spatial",
+        help="Base VLA checkpoint (HF repo or local path)",
+    )
+
+    ap.add_argument(
+        "--adapter-path",
+        default="/root/oft_cdpr_ckpts/cdpr_finetune_20251203-133649/vla_cdpr_adapter",
+    )
+    ap.add_argument(
+        "--action-head-path",
+        default="/root/oft_cdpr_ckpts/cdpr_finetune_20251203-133649/action_head_cdpr.pt",
+    )
+    ap.add_argument("--center-crop", action="store_true", default=True)
+    ap.add_argument("--no-center-crop", dest="center_crop", action="store_false")
+    ap.add_argument("--steps", type=int, default=50)
+    ap.add_argument("--chunk-length", type=int, default=None, help="Override NUM_ACTIONS_CHUNK")
+    ap.add_argument("--instr", default="Pick up the ketchup bottle.")
+    ap.add_argument("--x-bound", default="-0.8,0.8")
+    ap.add_argument("--y-bound", default="-0.8,0.8")
+    ap.add_argument("--z-bound", default="0.10,1.20")
+    ap.add_argument("--grip-range", default="0.0,0.06")
+    ap.add_argument("--no-adapter", action="store_true", help="Skip adapter loading")
     args = ap.parse_args()
 
     def parse_pair(s):
         lo, hi = map(float, s.split(","))
         return (lo, hi)
+
     xyz_bounds = (parse_pair(args.x_bound), parse_pair(args.y_bound), parse_pair(args.z_bound))
     gr_range = parse_pair(args.grip_range)
 
-    # ---- build OFT config ----
+    print("=" * 80)
+    print("🤖 OpenVLA-OFT CDPR Runner (5-DoF)")
+    print("=" * 80)
+    print(f"Instruction: {args.instr}")
+    print(f"Steps: {args.steps}")
+    print(f"XYZ bounds: {xyz_bounds}")
+    print(f"Gripper range: {gr_range}")
+    print(f"Adapter: {'Disabled' if args.no_adapter else 'Enabled'}")
+    if not args.no_adapter:
+        print(f"Adapter path: {args.adapter_path}")
+        print(f"Action head: {args.action_head_path}")
+    print(f"Base checkpoint: {args.base_ckpt}")
+    print("=" * 80)
+
+    # ---- Build config ----
+    print("\n📝 Building config...")
     cfg = GenerateConfig(
-        pretrained_checkpoint=args.ckpt,
-        use_l1_regression=True,   # continuous actions head
+        pretrained_checkpoint=args.base_ckpt,
+        use_l1_regression=True,
         use_diffusion=False,
         use_film=False,
-        num_images_in_input=2,    # full_image + wrist_image
+        num_images_in_input=2,
         use_proprio=True,
         load_in_8bit=False,
         load_in_4bit=False,
-        center_crop=bool(args.center_crop),
-        num_open_loop_steps=NUM_ACTIONS_CHUNK,  # policy emits a chunk of this length
-        unnorm_key="libero_spatial_no_noops",   # choose per checkpoint family
+        center_crop=args.center_crop,
+        num_open_loop_steps=args.chunk_length if args.chunk_length else NUM_ACTIONS_CHUNK,
+        unnorm_key="bc_z",
+    )
+    cfg.cdpr_dataset_stats_path = (
+        "/root/oft_cdpr_ckpts/"
+        "openvla-7b-oft-finetuned-libero-spatial+cdpr_local+b1+lr-0.0001+lora-r32+dropout-0.0/"
+        "dataset_statistics.json"
     )
 
-    # ---- init sim ----
-    sim = HeadlessCDPRSimulation(args.xml, output_dir="oft_runs")
+    # 👇 Add this line
+    cfg.cdpr_action_head_path = args.action_head_path
+
+
+    # ---- Init sim ----
+    print("\n🎮 Initializing simulation...")
+    sim = HeadlessCDPRSimulation(args.xml, output_dir="oft_cdpr_runs")
     sim.initialize()
-    # Ensure we hold the current pose at t=0 (your earlier helper)
     if hasattr(sim, "hold_current_pose"):
         sim.hold_current_pose(warm_steps=0)
 
-    # ---- load policy + heads ----
-    vla = get_vla(cfg)
+    ee_start = sim.get_end_effector_position().copy()
+    yaw_start = sim.get_yaw() if hasattr(sim, "get_yaw") else 0.0
+    grip_start = getattr(sim, "get_gripper_opening", lambda: 0.03)()
+    print(f"📍 Start: EE={ee_start.round(3)}, Yaw={yaw_start:.3f}, Grip={grip_start:.3f}")
+
+    # ---- Load base VLA model ----
+    print("\n🤖 Loading VLA base model...")
+    vla_base = get_vla(cfg)
+    vla_base.eval()
+
+    device = next(vla_base.parameters()).device
+    print(f"✅ Base model on {device}")
+
+    # ---- Load CDPR adapter via PEFT ----
+    if not args.no_adapter and os.path.isdir(args.adapter_path):
+        print("\n🔧 Loading CDPR adapter (PEFT)...")
+        try:
+            vla = PeftModel.from_pretrained(vla_base, args.adapter_path)
+            vla.eval()
+            device = next(vla.parameters()).device
+            print("✅ Adapter loaded into VLA model")
+        except Exception as e:
+            print(f"❌ Error loading adapter: {e}")
+            print("⚠️  Falling back to base model without CDPR adapter")
+            vla = vla_base
+    else:
+        print("⚠️  Adapter disabled or path not found; using base model")
+        vla = vla_base
+        
+    device = next(vla.parameters()).device
+    # ---- Instance-level monkey-patch for _unnormalize_actions ----
+    def cdpr_unnormalize_actions_inst(self, normalized_actions, unnorm_key=None):
+        return normalized_actions
+
+    # target is the underlying base model if PEFT-wrapped, otherwise vla itself
+    target = getattr(vla, "base_model", vla)
+
+    # patch on the base model
+    target._unnormalize_actions = types.MethodType(cdpr_unnormalize_actions_inst, target)
+    print(f"🔧 Patched instance _unnormalize_actions on {type(target).__name__}")
+
+
+    import torch
+
+    # We know OpenVLA runs its policy in bfloat16 (your errors also reference BFloat16),
+    # so we standardize all CDPR add-ons to this dtype.
+    half_dtype = torch.bfloat16
+
+    # --- Ensure vision backbone knows about multi-image input ---
+    if hasattr(vla, "vision_backbone"):
+        vb = vla.vision_backbone
+        old_nimg = getattr(vb, "num_images_in_input", None)
+        try:
+            vb.num_images_in_input = cfg.num_images_in_input
+            print(f"👀 Vision backbone num_images_in_input: {old_nimg} -> {vb.num_images_in_input}")
+        except Exception as e:
+            print(f"⚠️ Could not set vision_backbone.num_images_in_input: {e}")
+
+
+        # --- Ensure vision backbone knows we are using multi-image input (full + wrist) ---
+    if hasattr(vla, "vision_backbone"):
+        vb = vla.vision_backbone
+        old_nimg = getattr(vb, "num_images_in_input", None)
+        try:
+            vb.num_images_in_input = cfg.num_images_in_input
+            print(
+                f"👀 Vision backbone num_images_in_input: {old_nimg} -> {vb.num_images_in_input}"
+            )
+        except Exception as e:
+            print(f"⚠️ Could not set vision_backbone.num_images_in_input: {e}")
+        
+    cdpr_stats_root = (
+        "/root/oft_cdpr_ckpts/"
+        "openvla-7b-oft-finetuned-libero-spatial+cdpr_local+b1+lr-0.0001+lora-r32+dropout-0.0"
+    )
+    print(f"\n📊 Loading CDPR dataset statistics from: {cdpr_stats_root}")
+    _load_dataset_stats(vla, cdpr_stats_root)
+    
+    print("cdpr_local entry keys:", vla.norm_stats["cdpr_local"].keys())
+    
+    print("🔑 Available norm_stats keys:", getattr(vla, "norm_stats", {}).keys())
+        
+    device = next(vla.parameters()).device
+    # ---- Load action head ----
+    print("\n🎯 Loading action head...")
+
+    if not args.no_adapter and os.path.exists(args.action_head_path):
+        action_head = get_action_head(cfg, llm_dim=vla.llm_dim)
+        print("✅ Loaded fine-tuned CDPR action head via get_action_head")
+    else:
+        print("⚠️ Using base action head (no adapter or missing path)")
+        action_head = get_action_head(cfg, llm_dim=vla.llm_dim)
+
+    action_head = action_head.to(device=device, dtype=half_dtype)
+    action_head.eval()
+    
+    print(f"🎯 Action head dtype set to {action_head.model.fc1.weight.dtype}")
+
+    # ---- Load processor and proprio projector ----
+    print("\n⚙️ Loading processor & proprio projector...")
     processor = get_processor(cfg)
-    action_head = get_action_head(cfg, llm_dim=vla.llm_dim)
 
-    # Build one observation to determine proprio_dim dynamically
-    obs, proprio_dim = make_observation(sim, args.instr)
-    proprio_projector = get_proprio_projector(cfg, llm_dim=vla.llm_dim, proprio_dim=proprio_dim)
+    obs, proprio_dim = make_observation(sim, args.instr, gripper_range=gr_range)
+    proprio_projector = get_proprio_projector(
+        cfg, llm_dim=vla.llm_dim, proprio_dim=proprio_dim
+    )
+    proprio_projector = proprio_projector.to(device=device, dtype=half_dtype)
+    print(f"⚙️ Proprio projector dtype set to {next(proprio_projector.parameters()).dtype}")
 
-    # helper to get a fresh chunk when needed
-    def request_chunk():
-        o, _ = make_observation(sim, args.instr)
-        # print("full:", o["full_image"].shape, o["full_image"].dtype)
-        # print("wrist:", o["wrist_image"].shape, o["wrist_image"].dtype)
-        # print("proprio:", o["state"].shape, o["state"].dtype)
 
-        acts = get_vla_action(cfg, vla, processor, o, o["task_description"], action_head, proprio_projector)
-        # acts is a list/array of 7D actions per tick (length NUM_ACTIONS_CHUNK)
-        return acts
+    print(f"\n📊 System ready:")
+    print(f"   - Action chunk length: {cfg.num_open_loop_steps}")
+    print(f"   - Proprio dimension: {proprio_dim}")
+    print(f"   - Images: {obs['full_image'].shape} (full), {obs['wrist_image'].shape} (wrist)")
 
-    # first chunk
-    chunk = request_chunk()
-    c_idx = 0
-    
-    # --- quick sanity snapshot ---
-    # obs_dbg, _ = make_observation(sim, args.instr, xyz_bounds, gr_range, normalize_proprio=True)
-    # Image.fromarray(obs_dbg["full_image"]).save("diag_full.png")
-    # Image.fromarray(obs_dbg["wrist_image"]).save("diag_wrist.png")
-    # print("[diag] saved diag_full.png / diag_wrist.png")
+    # Save debug images
+    Image.fromarray(obs["full_image"]).save("debug_full.png")
+    Image.fromarray(obs["wrist_image"]).save("debug_wrist.png")
+    print("💾 Saved debug images: debug_full.png, debug_wrist.png")
 
-    # acts = get_vla_action(cfg, vla, processor, obs_dbg, obs_dbg["task_description"], action_head,
-    #                     get_proprio_projector(cfg, llm_dim=vla.llm_dim, proprio_dim=_))
-    # acts = np.array(acts, dtype=float)
-    # print("[diag] first 5 actions:\n", acts[:5])
-    # print("[diag] action mean/std:", acts.mean(axis=0), acts.std(axis=0))
+    # ---- Action generation helper ----
+    def get_action_chunk():
+        """Get a chunk of 5-DoF actions from the policy."""
+        o, _ = make_observation(sim, args.instr, gripper_range=gr_range)
+        try:
+            acts = get_vla_action(
+                cfg, vla, processor, o, o["task_description"], action_head, proprio_projector
+            )
+            if acts and len(acts) > 0:
+                acts_np = np.array(acts, dtype=float)
+                print(f"🎯 Generated {len(acts)} actions (shape {acts_np.shape})")
+                print(f"   First: {acts_np[0].round(3)}")
+                print(f"   Mean: {acts_np.mean(axis=0).round(3)}")
+            return acts
+        except Exception as e:
+            print(f"❌ Error generating actions: {e}")
+            # Return small safe 5D actions
+            return [
+                np.zeros(5, dtype=float) for _ in range(cfg.num_open_loop_steps)
+            ]
 
-    # ee_before = sim.get_end_effector_position().copy()
-    # for k in range(min(30, len(acts))):
-    #     xyz, yaw, grip = map_7d_to_cdpr5(acts[k], xyz_bounds, gr_range)
-    #     sim.set_target_position(xyz)
-    #     if hasattr(sim, "set_yaw"): sim.set_yaw(yaw)
-    #     if hasattr(sim, "set_gripper"): sim.set_gripper(grip)
-    #     sim.run_simulation_step(capture_frame=False)
-    # ee_after = sim.get_end_effector_position().copy()
-    # print("[diag] Δee after 30 action steps:", (ee_after - ee_before))
+    # ---- Initial test ----
+    print("\n🧪 Testing action generation...")
+    chunk = get_action_chunk()
+    if not chunk:
+        print("❌ No actions generated, exiting")
+        return
 
-    xyz_target = sim.get_end_effector_position().copy()
-    yaw_target = sim.get_yaw() if hasattr(sim, "get_yaw") else 0.0
-    grip_now   = getattr(sim, "get_gripper_opening", lambda: 0.03)()
-    
-    # ---- roll out ----
-    refresh_interval = len(chunk) # to refresh trajectory "online" in the future
-    for t in range(args.steps):
-        if t % refresh_interval == 0:
-            chunk = request_chunk()
-            c_idx = 0
-        if c_idx >= len(chunk):
-            chunk = request_chunk()
-            c_idx = 0
-        a7 = chunk[c_idx]; c_idx += 1
+    # ---- Rollout ----
+    print("\n🚀 Starting rollout...")
+    current_chunk = chunk
+    chunk_idx = 0
 
-        dxyz, dyaw, dgrip = map_7d_delta_to_cdpr5(a7, xyz_bounds, gr_range)
+    current_xyz = ee_start.copy()
+    current_yaw = yaw_start
+    current_grip_phys = grip_start
 
-        # integrate + clamp to workspace
-        xyz_target = xyz_target + dxyz
-        (xlo, xhi), (ylo, yhi), (zlo, zhi) = xyz_bounds
-        xyz_target[0] = np.clip(xyz_target[0], xlo, xhi)
-        xyz_target[1] = np.clip(xyz_target[1], ylo, yhi)
-        xyz_target[2] = np.clip(xyz_target[2], zlo, zhi)
+    for step in range(args.steps):
+        # Get new chunk if needed
+        if chunk_idx >= len(current_chunk):
+            print(f"\n🔄 Replanning at step {step}...")
+            current_chunk = get_action_chunk()
+            chunk_idx = 0
 
-        yaw_target = ((yaw_target + dyaw + np.pi) % (2*np.pi)) - np.pi
-        grip_now = float(np.clip(grip_now + dgrip, gr_range[0], gr_range[1]))
+        # Get current action (5D)
+        action_5d = current_chunk[chunk_idx]
+        chunk_idx += 1
 
-        sim.set_target_position(xyz_target)
-        # sim.set_target_position(np.array([0.0, -0.3, 0.3]))
-        # sim.set_yaw(1.0)
-        # for _ in range(240):
-        #     sim.run_simulation_step(capture_frame=False)
-        if hasattr(sim, "set_yaw"): sim.set_yaw(yaw_target)
-        if hasattr(sim, "set_gripper"): sim.set_gripper(grip_now)
+        # Map to CDPR commands
+        target_xyz, target_yaw, target_grip_phys = map_action_to_cdpr(
+            action_5d,
+            xyz_bounds,
+            gr_range,
+            current_xyz,
+            current_yaw,
+            current_grip_phys,
+        )
+
+        # Update current state
+        current_xyz = target_xyz.copy()
+        current_yaw = target_yaw
+        current_grip_phys = target_grip_phys
+
+        # Apply to simulation
+        sim.set_target_position(target_xyz)
+        if hasattr(sim, "set_yaw"):
+            sim.set_yaw(target_yaw)
+        if hasattr(sim, "set_gripper"):
+            sim.set_gripper(target_grip_phys)
 
         sim.run_simulation_step(capture_frame=True)
-    
-    # save via your built-ins
+
+        # Print progress
+        if step % 10 == 0 or step < 5:
+            ee_pos = sim.get_end_effector_position()[:3]
+            print(
+                f"  Step {step:3d}: EE=({ee_pos[0]:6.3f}, {ee_pos[1]:6.3f}, {ee_pos[2]:6.3f}) "
+                f"Grip={target_grip_phys:.3f}"
+            )
+
+    # ---- Save results ----
+    print("\n💾 Saving results...")
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    outdir = Path(sim.output_dir) / f"oft_run_{ts}"
+    outdir = Path(sim.output_dir) / f"run_{ts}"
     outdir.mkdir(parents=True, exist_ok=True)
-    sim.save_trajectory_results(str(outdir), "oft_cdpr")
+
+    ee_end = sim.get_end_effector_position().copy()
+    distance = np.linalg.norm(ee_end - ee_start)
+    print(f"\n📊 Results:")
+    print(f"   Start: {ee_start.round(3)}")
+    print(f"   End: {ee_end.round(3)}")
+    print(f"   Distance: {distance:.3f} meters")
+
+    sim.save_trajectory_results(str(outdir), "openvla_cdpr")
     sim.cleanup()
+
+    print(f"\n✅ Run completed!")
+    print(f"📁 Results saved to: {outdir}")
+    print("=" * 80)
+
 
 if __name__ == "__main__":
     main()
