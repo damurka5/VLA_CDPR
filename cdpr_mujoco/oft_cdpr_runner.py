@@ -11,20 +11,29 @@ import torch
 # ---- Apply cumsum patch ----
 _orig_cumsum = torch.cumsum
 
+
 def cumsum_bool_safe(input, dim, *args, **kwargs):
     if isinstance(input, torch.Tensor) and input.dtype == torch.bool:
         input = input.to(torch.int64)
     return _orig_cumsum(input, dim, *args, **kwargs)
+
 
 torch.cumsum = cumsum_bool_safe
 print("🔧 Applied cumsum patch")
 
 from safetensors.torch import load_file
 import json
+import yaml
 
 # ---- repo local import of your sim ----
 HERE = Path(__file__).resolve().parent
 sys.path.append(str(HERE))
+
+# ✅ Add VLA_CDPR root so `import cdpr_mujoco` works in other modules
+vla_cdpr_root = "/root/repo/VLA_CDPR"
+if vla_cdpr_root not in sys.path:
+    sys.path.append(vla_cdpr_root)
+
 from headless_cdpr_egl import HeadlessCDPRSimulation  # your class
 
 # Add OpenVLA-OFT to path BEFORE imports
@@ -36,6 +45,11 @@ if openvla_path not in sys.path:
 libero_path = "/root/repo/LIBERO"
 if libero_path not in sys.path:
     sys.path.append(libero_path)
+
+# Add CDPR_Dataset to path
+cdpr_dataset_root = "/root/repo/CDPR_Dataset"
+if cdpr_dataset_root not in sys.path:
+    sys.path.append(cdpr_dataset_root)
 
 # Now import OpenVLA-OFT modules
 try:
@@ -54,6 +68,17 @@ except ImportError as e:
     print(f"❌ Error importing OpenVLA-OFT modules: {e}")
     sys.exit(1)
 
+# Import dataset helper utilities
+try:
+    from cdpr_dataset.generate_cdpr_dataset import build_wrapper_if_needed
+    from cdpr_dataset.synthetic_tasks import task_language, place_objects_non_overlapping
+    print("✅ Imported CDPR dataset helpers (build_wrapper_if_needed, task_language, place_objects_non_overlapping)")
+except ImportError as e:
+    print(f"⚠️ Could not import CDPR dataset helpers: {e}")
+    build_wrapper_if_needed = None
+    task_language = None
+    place_objects_non_overlapping = None
+
 from peft import PeftModel
 import types
 
@@ -61,6 +86,7 @@ import types
 # ======================================================================
 #  CDPR-specific observation helper
 # ======================================================================
+
 
 def make_observation(sim, task_text, gripper_range=(0.0, 0.06)):
     """
@@ -101,6 +127,7 @@ def make_observation(sim, task_text, gripper_range=(0.0, 0.06)):
 # ======================================================================
 #  CDPR-specific action mapping (5D → physical commands)
 # ======================================================================
+
 
 def map_action_to_cdpr(
     act5,
@@ -154,11 +181,19 @@ def map_action_to_cdpr(
 #  Main runner
 # ======================================================================
 
+
 def main():
     import argparse
 
     ap = argparse.ArgumentParser("OpenVLA-OFT CDPR Runner")
-    ap.add_argument("--xml", required=True, help="Wrapper MJCF")
+
+    # If you pass --xml explicitly, we use that and ignore catalog scene/task logic.
+    ap.add_argument(
+        "--xml",
+        required=False,
+        help="Wrapper MJCF (if not using dataset catalog scene/object).",
+    )
+
     ap.add_argument(
         "--base-ckpt",
         default="moojink/openvla-7b-oft-finetuned-libero-spatial",
@@ -172,16 +207,55 @@ def main():
         "--action-head-path",
         default="/root/oft_cdpr_ckpts/cdpr_finetune_20251203-133649/action_head_cdpr.pt",
     )
+
+    # We will auto-fill instr from dataset task if not provided.
+    ap.add_argument(
+        "--instr",
+        type=str,
+        default=None,
+        help="Language instruction. "
+        "If omitted and no --xml is provided, we use cdpr_dataset.task_language(task_name, object).",
+    )
+
     ap.add_argument("--center-crop", action="store_true", default=True)
     ap.add_argument("--no-center-crop", dest="center_crop", action="store_false")
     ap.add_argument("--steps", type=int, default=50)
     ap.add_argument("--chunk-length", type=int, default=None)
-    ap.add_argument("--instr", default="Pick up the ketchup bottle.")
+
+    # CDPR workspace bounds
     ap.add_argument("--x-bound", default="-0.8,0.8")
     ap.add_argument("--y-bound", default="-0.8,0.8")
     ap.add_argument("--z-bound", default="0.10,1.20")
     ap.add_argument("--grip-range", default="0.0,0.06")
     ap.add_argument("--no-adapter", action="store_true")
+
+    # ---- Dataset-style configuration (matching your generator command) ----
+    ap.add_argument(
+        "--catalog",
+        type=str,
+        default="/root/repo/CDPR_Dataset/cdpr_dataset/datasets/cdpr_scene_catalog.yaml",
+        help="Path to scene/object YAML (same as used in generate_cdpr_dataset). "
+             "Ignored if --xml is provided.",
+    )
+    ap.add_argument(
+        "--scene",
+        type=str,
+        default="desk",
+        help="Scene name from the catalog. Default matches your catalog: 'desk'.",
+    )
+    ap.add_argument(
+        "--object",
+        type=str,
+        default="milk",
+        help="Main object name from catalog. Default: 'milk'.",
+    )
+    ap.add_argument(
+        "--task-name",
+        type=str,
+        default="put_into_bowl",
+        help="Task name used in dataset generator. Default: 'put_into_bowl'.",
+    )
+
     args = ap.parse_args()
 
     def parse_pair(s):
@@ -194,6 +268,100 @@ def main():
     print("=" * 80)
     print("🤖 OpenVLA-OFT CDPR Runner (5-DoF)")
     print("=" * 80)
+
+    # ------------------------------------------------------------------
+    # Resolve XML and instruction: either user-specified XML, or
+    # dataset-style scene+task (matching generate_cdpr_dataset.py).
+    # ------------------------------------------------------------------
+    def _require(cond, msg):
+        if not cond:
+            raise SystemExit(msg)
+
+    dataset_scene_name = None
+    dataset_object_name = None
+
+    if args.xml is not None:
+        # Explicit XML → behave like your original runner
+        xml_path = args.xml
+        print(f"\n🧱 Using explicit wrapper XML: {xml_path}")
+
+        if args.instr is not None:
+            instr = args.instr
+        else:
+            instr = "Pick up the ketchup bottle."
+        print(f"🗣  Instruction: '{instr}' (explicit/legacy mode)")
+    else:
+        # Dataset-style mode: reuse catalog + build_wrapper_if_needed + task_language
+        _require(build_wrapper_if_needed is not None, "CDPR dataset helpers not available (build_wrapper_if_needed).")
+        _require(task_language is not None, "CDPR dataset helpers not available (task_language).")
+
+        catalog_path = args.catalog
+        print(f"\n📚 Loading catalog for dataset-style scene: {catalog_path}")
+        with open(catalog_path, "r") as f:
+            cfg_yaml = yaml.safe_load(f)
+
+        defaults = cfg_yaml.get("defaults", {})
+        scenes_cfg = cfg_yaml.get("scenes", [])
+
+        scene_entry = None
+        for entry in scenes_cfg:
+            if isinstance(entry, dict):
+                if entry.get("name") == args.scene:
+                    scene_entry = entry
+                    break
+            else:
+                if str(entry) == args.scene:
+                    scene_entry = {"name": str(entry), "objects": []}
+                    break
+
+        _require(scene_entry is not None, f"Scene '{args.scene}' not found in catalog.")
+
+        scene_name = scene_entry["name"]
+        object_names = scene_entry.get("objects", [])
+        dataset_scene_name = scene_name
+
+        if args.object is not None:
+            dataset_object_name = args.object
+            if object_names and dataset_object_name not in object_names:
+                print(
+                    f"⚠️ Warning: object '{dataset_object_name}' not in catalog scene objects {object_names}. "
+                    f"Using it anyway."
+                )
+        else:
+            dataset_object_name = object_names[0] if object_names else "target_object"
+
+        scene_z = defaults.get("scene_z", -0.85)
+        ee_start = defaults.get("ee_start", (0.0, 0.0, 0.25))
+        table_z = defaults.get("table_z", 0.15)
+        settle_t = defaults.get("settle_time", 1.0)
+
+        print(
+            f"\n🏗  Building (or reusing) dataset-style wrapper for scene='{scene_name}', "
+            f"objects={object_names}"
+        )
+        wrapper_xml = build_wrapper_if_needed(
+            scene_name,
+            object_names,
+            scene_z=scene_z,
+            ee_start=ee_start,
+            table_z=table_z,
+            settle_time=settle_t,
+        )
+        xml_path = str(wrapper_xml)
+        print(f"🧱 Using wrapper XML from dataset builder: {xml_path}")
+
+        # Decide instruction
+        if args.instr is not None:
+            instr = args.instr
+            print(f"\n🗣  Using user-provided instruction: '{instr}'")
+        else:
+            task_name = args.task_name or "put_into_bowl"
+            obj_for_lang = dataset_object_name or "object"
+            instr = task_language(task_name, obj_for_lang)
+            print(
+                f"\n🗣  Using dataset-style language for task='{task_name}', object='{obj_for_lang}':\n"
+                f"    '{instr}'"
+            )
 
     # ---- Build config ----
     print("\n📝 Building config...")
@@ -208,16 +376,29 @@ def main():
         load_in_4bit=False,
         center_crop=args.center_crop,
         num_open_loop_steps=args.chunk_length if args.chunk_length else NUM_ACTIONS_CHUNK,
-        # You can set this to your CDPR dataset name if you want RLDS un-normalization
-        # and have stats for it. Since you also patch _unnormalize_actions below,
-        # leaving it as None keeps things identity.
+        # We patch _unnormalize_actions below to be identity for CDPR.
         unnorm_key=None,
     )
 
     # ---- Init sim ----
     print("\n🎮 Initializing simulation...")
-    sim = HeadlessCDPRSimulation(args.xml, output_dir="oft_cdpr_runs")
+    sim = HeadlessCDPRSimulation(xml_path=xml_path, output_dir="oft_cdpr_runs")
     sim.initialize()
+
+    # Optional: apply central placement like in generate_cdpr_dataset.run_episode()
+    if args.xml is None and place_objects_non_overlapping is not None:
+        try:
+            real_obj = getattr(sim, "get_object_body_name", lambda: None)()
+            if real_obj is None:
+                real_obj = dataset_object_name
+            if real_obj is not None:
+                xy_bounds = ((-0.12, 0.12), (-0.12, 0.12), 0.10)
+                print(f"📦 Applying dataset-style central placement for object '{real_obj}'")
+                place_objects_non_overlapping(sim, [real_obj], xy_bounds, min_gap=0.015)
+            else:
+                print("⚠️ Could not determine object body name for dataset-style placement.")
+        except Exception as e:
+            print(f"⚠️ Dataset-style placement failed: {e}")
 
     ee_start = sim.get_end_effector_position().copy()
     yaw_start = sim.get_yaw() if hasattr(sim, "get_yaw") else 0.0
@@ -273,8 +454,7 @@ def main():
     if os.path.exists(stats_path):
         with open(stats_path, "r") as f:
             stats = json.load(f)
-        # Store in model for compatibility – you can set cfg.unnorm_key="cdpr_local"
-        # if you want to use this, and also stop overriding _unnormalize_actions.
+        # Store in model for compatibility – if you later want to use unnorm_key="cdpr_local"
         if not hasattr(vla, "norm_stats"):
             vla.norm_stats = {}
         vla.norm_stats["cdpr_local"] = stats
@@ -319,7 +499,7 @@ def main():
     processor = get_processor(cfg)
 
     # Get proprio dimension from observation
-    obs, proprio_dim = make_observation(sim, args.instr, gripper_range=gr_range)
+    obs, proprio_dim = make_observation(sim, instr, gripper_range=gr_range)
 
     proprio_projector = get_proprio_projector(
         cfg, llm_dim=vla.llm_dim, proprio_dim=proprio_dim
@@ -343,7 +523,7 @@ def main():
             vla,
             processor,
             obs,
-            args.instr,
+            instr,
             action_head,
             proprio_projector,
         )
@@ -368,6 +548,7 @@ def main():
     except Exception as e:
         print(f"❌ Error in test action generation: {e}")
         import traceback
+
         traceback.print_exc()
         return
 
@@ -386,14 +567,14 @@ def main():
         # Get new chunk if needed
         if chunk_idx >= len(current_chunk):
             print(f"\n🔄 Replanning at step {step}...")
-            obs, _ = make_observation(sim, args.instr, gripper_range=gr_range)
+            obs, _ = make_observation(sim, instr, gripper_range=gr_range)
             try:
                 current_chunk = get_vla_action(
                     cfg,
                     vla,
                     processor,
                     obs,
-                    args.instr,
+                    instr,
                     action_head,
                     proprio_projector,
                 )
