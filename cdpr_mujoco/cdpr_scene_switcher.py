@@ -41,6 +41,10 @@ OBJECTS_DIR_MAIN  = LIBERO_ASSETS / "stable_hope_objects"      # sauces, milk, e
 OBJECTS_DIR_EXTRA = LIBERO_ASSETS / "stable_scanned_objects"   # bowls, plates, basket, ...
 OBJECTS_DIRS = [OBJECTS_DIR_MAIN, OBJECTS_DIR_EXTRA]
 
+# --- EXTRA ASSETS (YCB) ---
+# Prefer env var, otherwise look for VLA_CDPR/external_assets/ycb_dataset/ycb
+YCB_ROOT = Path(os.environ.get("YCB_ASSETS", REPO / "external_assets" / "ycb_dataset" / "ycb")).resolve()
+
 CDPR_XML = HERE / "cdpr.xml"
 
 # replace your existing preprocess_scene_with_zoffset(...) with this:
@@ -132,23 +136,43 @@ def find_scene_xml(scene_name: str) -> Path:
 
 def find_object_xml(object_name: str) -> Path:
     """
-    Search for <object_name>.xml under both stable_hope_objects and stable_scanned_objects.
+    Search for object xml in:
+      1) LIBERO stable_hope_objects + stable_scanned_objects
+      2) YCB dataset (ycb/<name>.xml)
+    Supports prefix:
+      - "ycb_apple" -> "apple"
     """
+    name = object_name
+    if name.startswith("ycb_"):
+        name = name[len("ycb_"):]
+
+    # 1) LIBERO roots (your current behavior)
     for root in OBJECTS_DIRS:
-        d = root / object_name
-        cand = d / f"{object_name}.xml"
+        d = root / name
+        cand = d / f"{name}.xml"
         if cand.exists():
             return cand
-        # fallback: first xml under dir, if any
         if d.exists():
             xmls = list(d.glob("*.xml"))
             if xmls:
                 return xmls[0]
 
-    roots_str = ", ".join(str(r) for r in OBJECTS_DIRS)
+    # 2) YCB root: ycb/<name>.xml (your repo layout matches this)
+    cand = YCB_ROOT / f"{name}.xml"
+    if cand.exists():
+        return cand
+
+    # fallback: try any xml matching name
+    xmls = list(YCB_ROOT.glob(f"{name}*.xml"))
+    if xmls:
+        return xmls[0]
+
     raise FileNotFoundError(
-        f"Object '{object_name}' not found under any of: {roots_str}"
+        f"Object '{object_name}' not found.\n"
+        f"Checked LIBERO roots: {', '.join(str(r) for r in OBJECTS_DIRS)}\n"
+        f"Checked YCB root: {YCB_ROOT}"
     )
+
 
 def make_placed_object_xml(orig_object_xml: Path,
                            out_xml: Path,
@@ -172,7 +196,19 @@ def make_placed_object_xml(orig_object_xml: Path,
         a_copy = clone(a)
         for sub in a_copy:
             if sub.tag in ("mesh", "texture", "skin") and "file" in sub.attrib:
-                sub.set("file", str((src_dir / sub.get("file")).resolve()))
+                rel = sub.get("file")
+                p1 = (src_dir / rel).resolve()
+
+                # If not found, try <xml_basename>/<rel>
+                # Example: ycb/apple.xml + "textured.obj" -> ycb/apple/textured.obj
+                if not p1.exists():
+                    base = orig_object_xml.stem  # e.g. "apple"
+                    p2 = (src_dir / base / rel).resolve()
+                    if p2.exists():
+                        p1 = p2
+
+                sub.set("file", str(p1))
+
         asset_elems.append(a_copy)
 
     # take first body under worldbody
@@ -257,15 +293,43 @@ def make_placed_object_xml(orig_object_xml: Path,
             rewrite_body_refs(ch)
     rewrite_body_refs(body_clone)
 
-    # --- pose (MuJoCo body.quat wants w x y z)
+    # --- pose ---
     body_clone.set("pos", f"{pos[0]} {pos[1]} {pos[2]}")
+    
+    print("orig orient attrs:", {k: body_clone.get(k) for k in ("quat","euler","axisangle","xyaxes","zaxis") if k in body_clone.attrib})
+
+    # MuJoCo allows only ONE orientation specifier on <body>
+    for k in ("quat", "euler", "axisangle", "xyaxes", "zaxis"):
+        if k in body_clone.attrib:
+            del body_clone.attrib[k]
+
+    # incoming is qx,qy,qz,qw  -> MuJoCo wants w x y z
     wxyz = (float(quat[3]), float(quat[0]), float(quat[1]), float(quat[2]))
     body_clone.set("quat", f"{wxyz[0]} {wxyz[1]} {wxyz[2]} {wxyz[3]}")
 
-    # ensure dynamic if requested
-    has_joint = any(elem.tag == "joint" for elem in body_clone.iter())
-    if force_dynamic and not has_joint:
+    # ensure dynamic if requested (normalize to exactly one 6-DoF freejoint)
+    if force_dynamic:
+        # Remove ALL <joint> tags in the subtree (rigid-object normalization)
+        def strip_joints(elem):
+            for ch in list(elem):
+                if ch.tag == "joint":
+                    elem.remove(ch)
+                else:
+                    strip_joints(ch)
+        strip_joints(body_clone)
+
+        # Remove any existing <freejoint> tags too (avoid duplicates)
+        def strip_freejoints(elem):
+            for ch in list(elem):
+                if ch.tag == "freejoint":
+                    elem.remove(ch)
+                else:
+                    strip_freejoints(ch)
+        strip_freejoints(body_clone)
+
+        # Add exactly one freejoint on the root body
         ET.SubElement(body_clone, "freejoint")
+
 
     # --- build minimal MJCF with assets + body
     mj = ET.Element("mujoco")
