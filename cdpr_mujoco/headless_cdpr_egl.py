@@ -78,6 +78,7 @@ class HeadlessCDPRSimulation:
         self.model = None
         self.data = None
         self.gl_context = None
+        self._glfw_window = None
 
         # CDPR frame anchor points (must match XML)
         self.frame_points = np.array([
@@ -211,15 +212,11 @@ class HeadlessCDPRSimulation:
         self.overview_cam = mj.MjvCamera()
         self.ee_cam = mj.MjvCamera()
 
-        # self.overview_cam.type = mj.mjtCamera.mjCAMERA_FREE
-        # self.overview_cam.distance = 1.5 # previous value 3.0
-        # self.overview_cam.azimuth = 0
-        # self.overview_cam.elevation = -35 # previous value -25
         self.overview_cam.type = mj.mjtCamera.mjCAMERA_FREE
-        self.overview_cam.lookat[:] = np.array([0.0, 0.0, 0.10])  # center of table
+        self.overview_cam.lookat[:] = np.array([0.0, 0.0, 0.10])
         self.overview_cam.distance = 1.5
-        self.overview_cam.azimuth = 90     # look from -y toward +y
-        self.overview_cam.elevation = -30   # slight downward tilt
+        self.overview_cam.azimuth = 90
+        self.overview_cam.elevation = -30
 
         self.ee_cam.type = mj.mjtCamera.mjCAMERA_FIXED
         self.ee_cam.fixedcamid = self.cam_id
@@ -231,10 +228,27 @@ class HeadlessCDPRSimulation:
         self.offwidth, self.offheight = 640, 480
         self.offviewport = mj.MjrRect(0, 0, self.offwidth, self.offheight)
 
+        # --------- IMPORTANT: ensure an active GL context exists ----------
         if EGL_AVAILABLE:
             self.gl_context = GLContext(max_width=self.offwidth, max_height=self.offheight)
             self.gl_context.make_current()
+        else:
+            # GLFW fallback for macOS / no EGL
+            from mujoco.glfw import glfw
+            if not glfw.init():
+                raise RuntimeError("GLFW init failed (needed for rendering on this machine).")
+
+            glfw.window_hint(glfw.VISIBLE, glfw.FALSE)  # hidden window
+            self._glfw_window = glfw.create_window(64, 64, "offscreen", None, None)
+            if not self._glfw_window:
+                raise RuntimeError("Failed to create GLFW window for GL context.")
+            glfw.make_context_current(self._glfw_window)
+            glfw.swap_interval(0)
+        # ----------------------------------------------------------------
+
         self.context = mj.MjrContext(self.model, mj.mjtFontScale.mjFONTSCALE_150.value)
+
+        # If OFFSCREEN fails on some drivers, you can flip this to WINDOW as fallback.
         mj.mjr_setBuffer(mj.mjtFramebuffer.mjFB_OFFSCREEN, self.context)
 
     def capture_frame(self, camera, camera_name):
@@ -366,33 +380,6 @@ class HeadlessCDPRSimulation:
 
     def get_target_position(self):
         return self.data.xpos[self.body_target].copy()
-
-    # def set_gripper(self, opening_m):
-    #     opening = float(np.clip(opening_m, 0.0, 0.06))  # your bigger range
-    #     self.data.ctrl[self.act_gripper] = opening
-
-    # def open_gripper(self):  self.set_gripper(0.06)
-    # def close_gripper(self): self.set_gripper(0.0)
-
-    def set_gripper(self, open_fraction: float):
-        """
-        open_fraction = 0.0 -> fully CLOSED
-        open_fraction = 1.0 -> fully OPEN
-        """
-        # actuator_ctrlrange is [min, max] allowed ctrl for this actuator
-        ctrl_min, ctrl_max = self.model.actuator_ctrlrange[self.act_gripper]
-        open_fraction = float(np.clip(open_fraction, 0.0, 1.0))
-        u = ctrl_min + open_fraction * (ctrl_max - ctrl_min)
-        self.data.ctrl[self.act_gripper] = u
-
-    def open_gripper(self):
-        self.set_gripper(1.0)
-
-    def close_gripper(self):
-        self.set_gripper(0.0)
-    
-    def set_yaw(self, yaw_rad):
-        self.data.ctrl[self.act_yaw] = float(np.clip(yaw_rad, -np.pi, np.pi))
     
     def set_target_position(self, target_pos):
         target_pos = np.asarray(target_pos, dtype=float)
@@ -419,8 +406,11 @@ class HeadlessCDPRSimulation:
     def close_gripper(self):
         self.set_gripper(0.0)
 
+    def get_yaw(self):
+        return float(self.data.qpos[self.jnt_yaw_qadr])
+
     def set_yaw(self, yaw_rad):
-        self.data.ctrl[self.act_yaw] = float(np.clip(yaw_rad, -np.pi, np.pi))
+        self.data.ctrl[self.act_yaw] = float(np.clip(yaw_rad, -2*np.pi, 2*np.pi))
 
     def record_trajectory_step(self):
         ee_pos = self.get_end_effector_position()
@@ -832,18 +822,27 @@ class HeadlessCDPRSimulation:
                 f.write(f"Final target position: {self.trajectory_data[-1]['target_position']}\n")
     
     def cleanup(self):
-        """Cleanup resources"""
-        if hasattr(self, 'context'):
+        if hasattr(self, "context"):
             try:
                 mj.mjr_setBuffer(mj.mjtFramebuffer.mjFB_WINDOW, self.context)
             except:
                 pass
+
+        if getattr(self, "_glfw_window", None) is not None:
+            try:
+                from mujoco.glfw import glfw
+                glfw.destroy_window(self._glfw_window)
+                glfw.terminate()
+            except:
+                pass
+
         if self.gl_context:
             try:
                 self.gl_context.free()
             except:
                 pass
         print("Simulation cleanup completed")
+
 
 def main():
     xml_path = "cdpr.xml"
