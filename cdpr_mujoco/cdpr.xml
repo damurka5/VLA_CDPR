@@ -115,7 +115,7 @@
         <!-- must have inertial because it has a joint -->
         <inertial pos="0 0 0" mass="0.15" diaginertia="0.0006 0.0006 0.0006"/>
         <joint name="ee_yaw" type="hinge" axis="0 0 1"
-              limited="true" range="-3.1416 3.1416" damping="0.4"/>
+              limited="true" range="-180 180" damping="0.4"/>
 
         <!-- ===== Orientation stabilizer under yaw ===== -->
         <body name="ee_stab" pos="0 0 0">
@@ -207,7 +207,7 @@
     <position name="slider_3_pos" joint="slider_3" ctrlrange="-4.5 4.5" kp="200" kv="80"/>
     <position name="slider_4_pos" joint="slider_4" ctrlrange="-4.5 4.5" kp="200" kv="80"/>
     <!-- Tool yaw and gripper -->
-    <position name="act_ee_yaw" joint="ee_yaw" kp="30" ctrlrange="-3.1416 3.1416"/>
+    <position name="act_ee_yaw" joint="ee_yaw" kp="30" ctrlrange="-180 180"/>
     <position name="act_gripper" joint="finger_l" kp="300" ctrlrange="0 0.06"/>
   </actuator>
 
