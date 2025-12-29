@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os, sys, time
+import subprocess
 from pathlib import Path
 from datetime import datetime
 import numpy as np
@@ -33,6 +34,9 @@ sys.path.append(str(HERE))
 vla_cdpr_root = "/root/repo/VLA_CDPR"
 if vla_cdpr_root not in sys.path:
     sys.path.append(vla_cdpr_root)
+    
+vla_cdpr_root = "/root/repo/VLA_CDPR"
+os.environ["PYTHONPATH"] = vla_cdpr_root + os.pathsep + os.environ.get("PYTHONPATH", "")
 
 from headless_cdpr_egl import HeadlessCDPRSimulation  # your class
 
@@ -201,11 +205,11 @@ def main():
     )
     ap.add_argument(
         "--adapter-path",
-        default="/root/oft_cdpr_ckpts/cdpr_finetune_20251203-133649/vla_cdpr_adapter",
+        default="/root/repo/cdpr_finetune_20251225-170938/vla_cdpr_adapter",
     )
     ap.add_argument(
         "--action-head-path",
-        default="/root/oft_cdpr_ckpts/cdpr_finetune_20251203-133649/action_head_cdpr.pt",
+        default="/root/repo/cdpr_finetune_20251225-170938/action_head_cdpr.pt",
     )
 
     # We will auto-fill instr from dataset task if not provided.
@@ -219,7 +223,7 @@ def main():
 
     ap.add_argument("--center-crop", action="store_true", default=True)
     ap.add_argument("--no-center-crop", dest="center_crop", action="store_false")
-    ap.add_argument("--steps", type=int, default=50)
+    ap.add_argument("--steps", type=int, default=200)
     ap.add_argument("--chunk-length", type=int, default=None)
 
     # CDPR workspace bounds
@@ -331,7 +335,7 @@ def main():
             dataset_object_name = object_names[0] if object_names else "target_object"
 
         scene_z = defaults.get("scene_z", -0.85)
-        ee_start = defaults.get("ee_start", (0.0, 0.0, 0.25))
+        ee_start = defaults.get("ee_start", (0.0, 0.0, 0.45))
         table_z = defaults.get("table_z", 0.15)
         settle_t = defaults.get("settle_time", 1.0)
 
@@ -377,7 +381,7 @@ def main():
         center_crop=args.center_crop,
         num_open_loop_steps=args.chunk_length if args.chunk_length else NUM_ACTIONS_CHUNK,
         # We patch _unnormalize_actions below to be identity for CDPR.
-        unnorm_key=None,
+        unnorm_key="cdpr_local", # was None
     )
 
     # ---- Init sim ----
@@ -415,8 +419,10 @@ def main():
         # For CDPR, we treat actions as already in the right scale
         return normalized_actions
 
-    vla_base._unnormalize_actions = types.MethodType(cdpr_unnormalize_actions_inst, vla_base)
-    print("🔧 Patched _unnormalize_actions on base model (identity)")
+    # vla_base._unnormalize_actions = types.MethodType(cdpr_unnormalize_actions_inst, vla_base)
+    # print("🔧 Patched _unnormalize_actions on base model (identity)")
+    print("Adapter path:", args.adapter_path, "isdir:", os.path.isdir(args.adapter_path))
+    print("Action head:", args.action_head_path, "exists:", os.path.exists(args.action_head_path))
 
     # ---- Load adapter ----
     if not args.no_adapter and os.path.isdir(args.adapter_path):
@@ -448,13 +454,62 @@ def main():
         "/root/oft_cdpr_ckpts",
         "openvla-7b-oft-finetuned-libero-spatial+cdpr_local+b1+lr-0.0001+lora-r32+dropout-0.0",
     )
+    stats_path = os.path.join(cdpr_stats_root, "dataset_statistics.json")
     print(f"\n📊 Loading CDPR dataset statistics from: {cdpr_stats_root}")
 
-    stats_path = os.path.join(cdpr_stats_root, "dataset_statistics.json")
     if os.path.exists(stats_path):
         with open(stats_path, "r") as f:
-            stats = json.load(f)
-        # Store in model for compatibility – if you later want to use unnorm_key="cdpr_local"
+            raw = json.load(f)
+
+        # Some files wrap stats under a dataset key
+        stats = raw.get("cdpr_local", raw)
+        
+        # ---- Ensure action stats have q01/q99 as required by bounds_q99 ----
+        a = stats.get("action", {})
+        if "q01" not in a:
+            for cand in ("q1", "p01", "pct01", "percentile_01", "low", "min"):
+                if cand in a:
+                    a["q01"] = a[cand]
+                    break
+
+        if "q99" not in a:
+            for cand in ("p99", "pct99", "percentile_99", "high", "max"):
+                if cand in a:
+                    a["q99"] = a[cand]
+                    break
+
+        stats["action"] = a
+
+        # Optional: if no mask provided, use all dims
+        if "mask" not in stats["action"] and "q01" in stats["action"]:
+            stats["action"]["mask"] = np.ones_like(np.array(stats["action"]["q01"]), dtype=bool).tolist()
+
+        print("📌 Action stats keys:", list(stats["action"].keys()))
+        if "q01" not in stats["action"] or "q99" not in stats["action"]:
+            raise KeyError(f"Action stats still missing q01/q99; have keys: {list(stats['action'].keys())}")
+
+        # Normalize common key names to what prismatic expects
+        if "action" not in stats:
+            for cand in ("actions", "action_stats", "act"):
+                if cand in stats:
+                    stats["action"] = stats[cand]
+                    break
+
+        if "proprio" not in stats:
+            for cand in ("state", "states", "proprio_stats", "obs_proprio"):
+                if cand in stats:
+                    stats["proprio"] = stats[cand]
+                    break
+
+        print("📌 Stats keys after normalization:", list(stats.keys()))
+
+        if "action" not in stats:
+            raise KeyError(
+                f"dataset_statistics.json missing action stats. Top keys were: {list(raw.keys())}"
+            )
+        if "proprio" not in stats:
+            print("⚠️ Still missing proprio stats; will run with raw proprio.")
+
         if not hasattr(vla, "norm_stats"):
             vla.norm_stats = {}
         vla.norm_stats["cdpr_local"] = stats
@@ -466,33 +521,107 @@ def main():
     print("\n🎯 Loading action head...")
     action_head = get_action_head(cfg, llm_dim=vla.llm_dim)
 
-    if os.path.exists(args.action_head_path):
-        try:
-            action_head_state_dict = torch.load(args.action_head_path, map_location="cpu")
+    # Use the underlying torch module if the wrapper has no forward()
+    head_mod = getattr(action_head, "model", action_head)
 
-            # Adjust keys if needed (strip 'model.' prefix)
-            if any(k.startswith("model.") for k in action_head_state_dict.keys()):
-                new_state_dict = {}
-                for k, v in action_head_state_dict.items():
-                    if k.startswith("model."):
-                        new_state_dict[k[6:]] = v
-                    else:
-                        new_state_dict[k] = v
-                action_head_state_dict = new_state_dict
+    def _state_fingerprint(sd):
+        # compact scalar summary
+        s = 0.0
+        n = 0
+        for k, v in sd.items():
+            if torch.is_tensor(v) and v.numel() > 0:
+                s += float(v.detach().float().mean().cpu())
+                n += 1
+        return s, n
 
-            missing, unexpected = action_head.load_state_dict(action_head_state_dict, strict=False)
-            if missing:
-                print(f"⚠️ Missing keys in action head: {missing}")
-            if unexpected:
-                print(f"⚠️ Unexpected keys in action head: {unexpected}")
-            print("✅ Loaded fine-tuned CDPR action head")
-        except Exception as e:
-            print(f"❌ Error loading action head weights: {e}")
-    else:
-        print("⚠️ Action head weights not found, using initialized weights")
+    def _mean_abs_params(mod):
+        s = 0.0
+        n = 0
+        for p in mod.parameters():
+            if p is None:
+                continue
+            s += float(p.detach().float().abs().mean().cpu())
+            n += 1
+        return s, n
 
+    # Snapshot BEFORE load (for diff)
+    before_sd = {k: v.detach().cpu().clone() for k, v in head_mod.state_dict().items()}
+    before_fp = _state_fingerprint(before_sd)
+
+    if not os.path.exists(args.action_head_path):
+        raise FileNotFoundError(f"Action head checkpoint not found: {args.action_head_path}")
+
+    ckpt = torch.load(args.action_head_path, map_location="cpu")
+    
+    head_mod = getattr(action_head, "model", action_head)
+    sig = float(next(iter(head_mod.parameters())).detach().float().mean().cpu())
+    print("🔑 action_head signature:", sig)
+
+    # Fix key prefix mismatch:
+    # - Sometimes ckpt keys are "fc1.weight" but module expects "layer_norm1.weight" under "model."
+    # We load into head_mod (not wrapper). head_mod usually expects keys WITHOUT "model." prefix.
+    # So if ckpt keys start with "model.", strip them. If head_mod expects "model." keys, keep them.
+    ckpt_keys = list(ckpt.keys())
+    head_keys = list(head_mod.state_dict().keys())
+
+    def strip_model_prefix(sd):
+        out = {}
+        for k, v in sd.items():
+            out[k[6:]] = v if k.startswith("model.") else v
+        return out
+
+    def add_model_prefix(sd):
+        return {("model." + k if not k.startswith("model.") else k): v for k, v in sd.items()}
+
+    # Decide mapping based on what head_mod expects
+    head_expects_model_prefix = any(k.startswith("model.") for k in head_keys)
+    ckpt_has_model_prefix = any(k.startswith("model.") for k in ckpt_keys)
+
+    if head_expects_model_prefix and not ckpt_has_model_prefix:
+        ckpt = add_model_prefix(ckpt)
+    elif (not head_expects_model_prefix) and ckpt_has_model_prefix:
+        ckpt = strip_model_prefix(ckpt)
+
+    # Load strictly (fail loudly if mismatch)
+    missing, unexpected = head_mod.load_state_dict(ckpt, strict=True)
+    print("✅ Loaded fine-tuned CDPR action head (strict=True)")
+    print("   missing:", missing)
+    print("   unexpected:", unexpected)
+    
+    # Verify weights actually changed
+    after_sd = {k: v.detach().cpu().clone() for k, v in head_mod.state_dict().items()}
+    after_fp = _state_fingerprint(after_sd)
+
+    diff = 0.0
+    for k in before_sd:
+        diff += float((before_sd[k] - after_sd[k]).abs().mean())
+
+    print(f"🔍 Action head verification:")
+    print(f"   underlying module: {type(head_mod)}")
+    print(f"   param abs-mean:    {_mean_abs_params(head_mod)}")
+    print(f"   fingerprint:       {before_fp} -> {after_fp}")
+    print(f"   mean_abs_diff:     {diff:.6g}  (should be > 0)")
+
+    # Move to device AFTER loading (fine either way, but this keeps diff computed on CPU)
     action_head = action_head.to(device=device, dtype=torch.bfloat16)
-    action_head.eval()
+    head_mod = getattr(action_head, "model", action_head)
+    head_mod.eval()
+
+    # Safe shape check: call underlying module, not wrapper
+    with torch.no_grad():
+        # infer expected input dim from LayerNorm
+        in_dim = head_mod.layer_norm1.normalized_shape[0]
+        x = torch.randn(2, in_dim, device=device, dtype=torch.bfloat16)
+        y = head_mod(x)
+        print(f"✅ Using action head checkpoint: {args.action_head_path}")
+        print(f"   in_dim={head_mod.layer_norm1.normalized_shape[0]}  out_dim={y.shape[-1]}")
+    print("DEBUG action head expected in_dim:", in_dim)
+    print("DEBUG action head output shape:", tuple(y.shape))
+
+    head_mod2 = getattr(action_head, "model", action_head)
+    sig2 = float(next(iter(head_mod2.parameters())).detach().float().mean().cpu())
+    print("🔑 action_head signature (pre-call):", sig2)
+
 
     # ---- Load processor & proprio projector ----
     print("\n⚙️ Loading processor & proprio projector...")
