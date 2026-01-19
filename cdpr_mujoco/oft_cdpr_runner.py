@@ -5,6 +5,7 @@ from pathlib import Path
 from datetime import datetime
 import numpy as np
 from PIL import Image
+from typing import Optional
 
 import mujoco as mj
 import torch
@@ -30,34 +31,26 @@ import yaml
 HERE = Path(__file__).resolve().parent
 sys.path.append(str(HERE))
 
-# ✅ Add VLA_CDPR root so `import cdpr_mujoco` works in other modules
-vla_cdpr_root = "/root/repo/VLA_CDPR"
-if vla_cdpr_root not in sys.path:
-    sys.path.append(vla_cdpr_root)
-    
-vla_cdpr_root = "/root/repo/VLA_CDPR"
-os.environ["PYTHONPATH"] = vla_cdpr_root + os.pathsep + os.environ.get("PYTHONPATH", "")
-
 from headless_cdpr_egl import HeadlessCDPRSimulation  # your class
 
-# Add OpenVLA-OFT to path BEFORE imports
-openvla_path = "/root/repo/openvla-oft"
-if openvla_path not in sys.path:
-    sys.path.append(openvla_path)
 
-# Add LIBERO to path
-libero_path = "/root/repo/LIBERO"
-if libero_path not in sys.path:
-    sys.path.append(libero_path)
+def add_repo(env_name: str, default_path: str):
+    p = Path(os.environ.get(env_name, default_path)).expanduser().resolve()
+    if not p.exists():
+        raise RuntimeError(f"{env_name} path does not exist: {p}")
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+    os.environ["PYTHONPATH"] = str(p) + os.pathsep + os.environ.get("PYTHONPATH", "")
+    print(f"✅ Added {env_name}: {p}")
 
-# Add CDPR_Dataset to path
-cdpr_dataset_root = "/root/repo/CDPR_Dataset"
-if cdpr_dataset_root not in sys.path:
-    sys.path.append(cdpr_dataset_root)
+add_repo("VLA_CDPR_ROOT",   "/home/damurka/repo/VLA_CDPR")
+add_repo("OPENVLA_OFT_ROOT","/home/damurka/repo/openvla-oft")
+add_repo("LIBERO_ROOT",     "/home/damurka/repo/LIBERO")
+add_repo("CDPR_DATASET_ROOT","/home/damurka/repo/CDPR-Dataset")
 
 # Now import OpenVLA-OFT modules
 try:
-    from experiments.robot.libero.run_libero_eval import GenerateConfig
+    # from experiments.robot.libero.run_libero_eval import GenerateConfig
     from experiments.robot.openvla_utils import (
         get_action_head,
         get_processor,
@@ -71,6 +64,22 @@ try:
 except ImportError as e:
     print(f"❌ Error importing OpenVLA-OFT modules: {e}")
     sys.exit(1)
+
+from dataclasses import dataclass
+
+@dataclass
+class GenerateConfig:
+    pretrained_checkpoint: str
+    use_l1_regression: bool = True
+    use_diffusion: bool = False
+    use_film: bool = False
+    num_images_in_input: int = 2
+    use_proprio: bool = True
+    load_in_8bit: bool = False
+    load_in_4bit: bool = False
+    center_crop: bool = True
+    num_open_loop_steps: int = 8
+    unnorm_key: Optional[str] = None
 
 # Import dataset helper utilities
 try:
@@ -205,11 +214,11 @@ def main():
     )
     ap.add_argument(
         "--adapter-path",
-        default="/root/repo/cdpr_finetune_20251225-170938/vla_cdpr_adapter",
+        default="/home/damurka/repo/cdpr_finetune_20260117-122720/vla_cdpr_adapter",
     )
     ap.add_argument(
         "--action-head-path",
-        default="/root/repo/cdpr_finetune_20251225-170938/action_head_cdpr.pt",
+        default="/home/damurka/repo/cdpr_finetune_20260117-122720/action_head_cdpr.pt",
     )
 
     # We will auto-fill instr from dataset task if not provided.
@@ -233,14 +242,21 @@ def main():
     ap.add_argument("--grip-range", default="0.0,0.06")
     ap.add_argument("--no-adapter", action="store_true")
 
-    # ---- Dataset-style configuration (matching your generator command) ----
+    cdpr_dataset_root = os.environ.get("CDPR_DATASET_ROOT", "/home/damurka/repo/CDPR-Dataset")
+    default_catalog = os.path.join(
+        cdpr_dataset_root,
+        "cdpr_dataset",
+        "datasets",
+        "cdpr_scene_catalog.yaml",
+    )
+
     ap.add_argument(
         "--catalog",
         type=str,
-        default="/root/repo/CDPR_Dataset/cdpr_dataset/datasets/cdpr_scene_catalog.yaml",
-        help="Path to scene/object YAML (same as used in generate_cdpr_dataset). "
-             "Ignored if --xml is provided.",
+        default=default_catalog,
+        help="Path to scene/object YAML (same as used in generate_cdpr_dataset).",
     )
+
     ap.add_argument(
         "--scene",
         type=str,
