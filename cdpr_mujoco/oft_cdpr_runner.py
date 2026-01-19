@@ -75,11 +75,24 @@ class GenerateConfig:
     use_film: bool = False
     num_images_in_input: int = 2
     use_proprio: bool = True
-    load_in_8bit: bool = False
+    load_in_8bit: bool = True
     load_in_4bit: bool = False
     center_crop: bool = True
     num_open_loop_steps: int = 8
     unnorm_key: Optional[str] = None
+
+def clear_memory():
+    """Clear GPU memory cache"""
+    import gc
+    torch.cuda.empty_cache()
+    gc.collect()
+
+def print_memory_stats(prefix=""):
+    """Print GPU memory usage"""
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / 1024**3
+        reserved = torch.cuda.memory_reserved() / 1024**3
+        print(f"{prefix} GPU Memory - Allocated: {allocated:.2f} GB, Reserved: {reserved:.2f} GB")
 
 # Import dataset helper utilities
 try:
@@ -426,8 +439,34 @@ def main():
     print(f"📍 Start: EE={ee_start.round(3)}, Yaw={yaw_start:.3f}, Grip={grip_start:.3f}")
 
     # ---- Load base VLA model ----
-    print("\n🤖 Loading VLA base model...")
-    vla_base = get_vla(cfg)
+    print("\n🤖 Loading VLA base model with CPU offloading...")
+    try:
+        # Try to load with device map auto (will split between CPU/GPU)
+        from accelerate import init_empty_weights, load_checkpoint_and_dispatch
+        from transformers import AutoConfig
+        
+        # Load config first
+        config = AutoConfig.from_pretrained(cfg.pretrained_checkpoint)
+        
+        # Initialize model on CPU
+        with init_empty_weights():
+            vla_base = get_vla(cfg)
+        
+        # Load checkpoint with device map
+        vla_base = load_checkpoint_and_dispatch(
+            vla_base,
+            cfg.pretrained_checkpoint,
+            device_map="auto",  # Automatically splits layers between CPU/GPU
+            offload_folder="offload",
+            offload_state_dict=True,
+            no_split_module_classes=["LlamaDecoderLayer"]  # Keep attention layers together
+        )
+    except Exception as e:
+        print(f"⚠️ Could not use accelerate loading: {e}")
+        print("🔄 Falling back to standard loading...")
+        vla_base = get_vla(cfg)
+        vla_base = vla_base.to('cpu')  # Keep on CPU initially
+        
     vla_base.eval()
 
     # Optional: instance-level patch for unnormalize_actions (identity)
@@ -660,42 +699,49 @@ def main():
     # ---- Test action generation using built-in get_vla_action ----
     print("\n🧪 Testing action generation...")
     try:
-        # NOTE: this get_vla_action is from experiments.robot.openvla_utils
-        # It internally calls vla.predict_action(), builds labels & action masks correctly,
-        # and returns a numpy array of shape (chunk, ACTION_DIM).
-        test_actions = get_vla_action(
-            cfg,
-            vla,
-            processor,
-            obs,
-            instr,
-            action_head,
-            proprio_projector,
-        )
-
+        # Clear memory before generation
+        clear_memory()
+        print_memory_stats("Before action generation: ")
+        
+        # Move model to GPU only during inference, then back to CPU
+        if not hasattr(vla, 'is_loaded_on_gpu') or not vla.is_loaded_on_gpu:
+            print("🚚 Moving model to GPU for inference...")
+            vla = vla.to(device)
+            vla.is_loaded_on_gpu = True
+        
+        with torch.inference_mode():  # More memory efficient
+            test_actions = get_vla_action(
+                cfg,
+                vla,
+                processor,
+                obs,
+                instr,
+                action_head,
+                proprio_projector,
+            )
+        
+        # Move model back to CPU to free GPU memory
+        print("🚚 Moving model back to CPU to free memory...")
+        vla = vla.to('cpu')
+        vla.is_loaded_on_gpu = False
+        clear_memory()
+        
         test_actions = np.asarray(test_actions, dtype=np.float32)
         print(f"✅ Generated {len(test_actions)} actions")
-        print(f"   Shape: {test_actions.shape}")
-        print(f"   First action: {test_actions[0]}")
-        print(f"   Mean: {test_actions.mean(axis=0)}")
-        print(f"   Std: {test_actions.std(axis=0)}")
-
-        if np.allclose(test_actions, 0, atol=1e-6):
-            print("⚠️ WARNING: Actions are all zeros!")
-            print("   Testing action head with random input...")
-            with torch.no_grad():
-                random_features = torch.randn(
-                    1, vla.llm_dim, device=device, dtype=torch.bfloat16
-                )
-                random_actions = action_head(random_features)
-                print(f"   Random test output shape: {random_actions.shape}")
-                print(f"   Random test values (first 5): {random_actions[0, :5]}")
+        print_memory_stats("After action generation: ")
+        
     except Exception as e:
         print(f"❌ Error in test action generation: {e}")
         import traceback
-
         traceback.print_exc()
         return
+
+    # ---- Rollout ----
+    print("\n🚀 Starting rollout...")
+
+    current_xyz = ee_start.copy()
+    current_yaw = yaw_start
+    current_grip_phys = grip_start
 
     # ---- Rollout ----
     print("\n🚀 Starting rollout...")
@@ -712,25 +758,42 @@ def main():
         # Get new chunk if needed
         if chunk_idx >= len(current_chunk):
             print(f"\n🔄 Replanning at step {step}...")
+            
+            # Clear memory before replanning
+            clear_memory()
+            
             obs, _ = make_observation(sim, instr, gripper_range=gr_range)
+            
             try:
-                current_chunk = get_vla_action(
-                    cfg,
-                    vla,
-                    processor,
-                    obs,
-                    instr,
-                    action_head,
-                    proprio_projector,
-                )
+                # Move model to GPU for inference
+                vla = vla.to(device)
+                
+                with torch.inference_mode():
+                    current_chunk = get_vla_action(
+                        cfg,
+                        vla,
+                        processor,
+                        obs,
+                        instr,
+                        action_head,
+                        proprio_projector,
+                    )
+                
+                # Move model back to CPU
+                vla = vla.to('cpu')
+                clear_memory()
+                
                 current_chunk = np.asarray(current_chunk, dtype=np.float32)
                 chunk_idx = 0
                 print(f"   Generated {len(current_chunk)} new actions")
+                
             except Exception as e:
                 print(f"❌ Error replanning: {e}")
                 # Use small safe actions
                 current_chunk = np.zeros((cfg.num_open_loop_steps, 5), dtype=float)
                 chunk_idx = 0
+    
+    
 
         # Get current action (5D for CDPR)
         action_5d = current_chunk[chunk_idx]
