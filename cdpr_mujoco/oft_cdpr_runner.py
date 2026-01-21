@@ -51,7 +51,7 @@ if libero_path not in sys.path:
     sys.path.append(libero_path)
 
 # Add CDPR_Dataset to path
-cdpr_dataset_root = "/root/repo/CDPR_Dataset"
+cdpr_dataset_root = "/root/repo/CDPR-Dataset"
 if cdpr_dataset_root not in sys.path:
     sys.path.append(cdpr_dataset_root)
 
@@ -205,11 +205,11 @@ def main():
     )
     ap.add_argument(
         "--adapter-path",
-        default="/root/repo/cdpr_finetune_20251225-170938/vla_cdpr_adapter",
+        default="/root/repo/VLA_CDPR/oft_cdpr_ckpts/cdpr_finetune_20260120-165034/vla_cdpr_adapter",
     )
     ap.add_argument(
         "--action-head-path",
-        default="/root/repo/cdpr_finetune_20251225-170938/action_head_cdpr.pt",
+        default="/root/repo/VLA_CDPR/oft_cdpr_ckpts/cdpr_finetune_20260120-165034/action_head_cdpr.pt",
     )
 
     # We will auto-fill instr from dataset task if not provided.
@@ -451,8 +451,7 @@ def main():
 
     # ---- Load dataset statistics ----
     cdpr_stats_root = os.path.join(
-        "/root/oft_cdpr_ckpts",
-        "openvla-7b-oft-finetuned-libero-spatial+cdpr_local+b1+lr-0.0001+lora-r32+dropout-0.0",
+        "/root/repo/cdpr_synth_10hz"
     )
     stats_path = os.path.join(cdpr_stats_root, "dataset_statistics.json")
     print(f"\n📊 Loading CDPR dataset statistics from: {cdpr_stats_root}")
