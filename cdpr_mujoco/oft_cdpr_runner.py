@@ -205,11 +205,11 @@ def main():
     )
     ap.add_argument(
         "--adapter-path",
-        default="/root/repo/VLA_CDPR/oft_cdpr_ckpts/cdpr_finetune_20260120-165034/vla_cdpr_adapter",
+        default="/root/repo/VLA_CDPR/oft_cdpr_ckpts/cdpr_finetune_step10000_20260210-080822_sbs700/vla_cdpr_adapter",
     )
     ap.add_argument(
         "--action-head-path",
-        default="/root/repo/VLA_CDPR/oft_cdpr_ckpts/cdpr_finetune_20260120-165034/action_head_cdpr.pt",
+        default="/root/repo/VLA_CDPR/oft_cdpr_ckpts/cdpr_finetune_step10000_20260210-080822_sbs700/action_head_cdpr.pt",
     )
 
     # We will auto-fill instr from dataset task if not provided.
@@ -237,7 +237,7 @@ def main():
     ap.add_argument(
         "--catalog",
         type=str,
-        default="/root/repo/CDPR_Dataset/cdpr_dataset/datasets/cdpr_scene_catalog.yaml",
+        default="/root/repo/CDPR-Dataset/cdpr_dataset/datasets/cdpr_scene_catalog.yaml",
         help="Path to scene/object YAML (same as used in generate_cdpr_dataset). "
              "Ignored if --xml is provided.",
     )

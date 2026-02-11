@@ -43,7 +43,7 @@ OBJECTS_DIRS = [OBJECTS_DIR_MAIN, OBJECTS_DIR_EXTRA]
 
 # --- EXTRA ASSETS (YCB) ---
 # Prefer env var, otherwise look for VLA_CDPR/external_assets/ycb_dataset/ycb
-YCB_ROOT = Path(os.environ.get("YCB_ASSETS", REPO / "external_assets" / "ycb_dataset" / "ycb")).resolve()
+YCB_ROOT = Path(os.environ.get("YCB_ASSETS", REPO / "CDPR-Dataset" / "cdpr_dataset" / "external_assets" / "ycb_dataset" / "ycb")).resolve()
 
 CDPR_XML = HERE / "cdpr.xml"
 
