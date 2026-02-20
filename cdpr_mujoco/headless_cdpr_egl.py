@@ -253,6 +253,8 @@ class HeadlessCDPRSimulation:
 
     def capture_frame(self, camera, camera_name):
         try:
+            if EGL_AVAILABLE and self.gl_context is not None:
+                self.gl_context.make_current()
             mj.mjv_updateScene(self.model, self.data, self.opt, None, camera,
                                mj.mjtCatBit.mjCAT_ALL.value, self.scene)
             mj.mjr_render(self.offviewport, self.scene, self.context)
@@ -395,6 +397,10 @@ class HeadlessCDPRSimulation:
         return np.linalg.norm(ee_pos - self.target_pos) < self.controller.threshold
 
     # === Gripper / yaw helpers ===
+    def get_gripper_opening(self):
+        # best-effort: commanded opening (ctrl) is at least consistent
+        return float(self.data.ctrl[self.act_gripper])
+
     def set_gripper(self, opening_m):
         """Set desired opening for left finger (right follows). Range [0, 0.03]."""
         opening = float(np.clip(opening_m, 0.0, 0.03))

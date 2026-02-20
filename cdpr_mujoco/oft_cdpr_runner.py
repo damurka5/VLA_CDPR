@@ -205,11 +205,11 @@ def main():
     )
     ap.add_argument(
         "--adapter-path",
-        default="/root/repo/VLA_CDPR/oft_cdpr_ckpts/cdpr_finetune_step10000_20260210-080822_sbs700/vla_cdpr_adapter",
+        default="/root/repo/VLA_CDPR/oft_cdpr_ckpts/cdpr_finetune_step10000_20260220-013512_sbs700/vla_cdpr_adapter",
     )
     ap.add_argument(
         "--action-head-path",
-        default="/root/repo/VLA_CDPR/oft_cdpr_ckpts/cdpr_finetune_step10000_20260210-080822_sbs700/action_head_cdpr.pt",
+        default="/root/repo/VLA_CDPR/oft_cdpr_ckpts/cdpr_finetune_step10000_20260220-013512_sbs700/action_head_cdpr.pt",
     )
 
     # We will auto-fill instr from dataset task if not provided.
@@ -223,14 +223,14 @@ def main():
 
     ap.add_argument("--center-crop", action="store_true", default=True)
     ap.add_argument("--no-center-crop", dest="center_crop", action="store_false")
-    ap.add_argument("--steps", type=int, default=200)
+    ap.add_argument("--steps", type=int, default=400)
     ap.add_argument("--chunk-length", type=int, default=None)
 
     # CDPR workspace bounds
     ap.add_argument("--x-bound", default="-0.8,0.8")
     ap.add_argument("--y-bound", default="-0.8,0.8")
     ap.add_argument("--z-bound", default="0.10,1.20")
-    ap.add_argument("--grip-range", default="0.0,0.06")
+    ap.add_argument("--grip-range", default="0.0,0.03")
     ap.add_argument("--no-adapter", action="store_true")
 
     # ---- Dataset-style configuration (matching your generator command) ----
@@ -375,7 +375,7 @@ def main():
         use_diffusion=False,
         use_film=False,
         num_images_in_input=2,
-        use_proprio=True,
+        use_proprio=False,
         load_in_8bit=False,
         load_in_4bit=False,
         center_crop=args.center_crop,
@@ -388,6 +388,10 @@ def main():
     print("\n🎮 Initializing simulation...")
     sim = HeadlessCDPRSimulation(xml_path=xml_path, output_dir="oft_cdpr_runs")
     sim.initialize()
+
+    SIM_DT = sim.controller.dt          # 1/60
+    DATA_DT = 1.0 / 10.0                # your demo rate
+    HOLD = 60 # 6
 
     # Optional: apply central placement like in generate_cdpr_dataset.run_episode()
     if args.xml is None and place_objects_non_overlapping is not None:
@@ -449,7 +453,9 @@ def main():
         except Exception as e:
             print(f"⚠️ Could not set num_images_in_input: {e}")
 
-    # ---- Load dataset statistics ----
+        denormalize_actions_np = None  # will be set if dataset_statistics.json provides q01/q99
+
+# ---- Load dataset statistics ----
     cdpr_stats_root = os.path.join(
         "/root/repo/cdpr_synth_10hz"
     )
@@ -513,6 +519,26 @@ def main():
             vla.norm_stats = {}
         vla.norm_stats["cdpr_local"] = stats
         print("✅ Loaded CDPR dataset statistics (as 'cdpr_local')")
+        # ---- Build denormalization helper (matches training: center/scale from q01/q99) ----
+        try:
+            _q01 = np.asarray(stats["action"]["q01"], dtype=np.float32)
+            _q99 = np.asarray(stats["action"]["q99"], dtype=np.float32)
+            _center = 0.5 * (_q01 + _q99)
+            _scale  = 0.5 * (_q99 - _q01)
+            _scale  = np.clip(_scale, 1e-6, None)
+
+            def denormalize_actions_np(a_n: np.ndarray) -> np.ndarray:
+                """Denormalize actions from [-1,1] back to dataset action units."""
+                a_n = np.asarray(a_n, dtype=np.float32)
+                return a_n * _scale + _center
+
+            # Attach for debugging / reuse
+            vla._cdpr_denormalize_actions_np = denormalize_actions_np
+            print(f"✅ Prepared CDPR action denormalizer (center/scale from q01/q99). center={_center}, scale={_scale}")
+        except Exception as e:
+            print(f"⚠️ Could not build action denormalizer from stats: {e}")
+            denormalize_actions_np = None
+
     else:
         print("⚠️ Dataset statistics not found")
 
@@ -628,6 +654,12 @@ def main():
 
     # Get proprio dimension from observation
     obs, proprio_dim = make_observation(sim, instr, gripper_range=gr_range)
+    for k in ["full_image", "wrist_image"]:
+        im = obs[k]
+        print(k, "mean/std/min/max:",
+            float(im.mean()), float(im.std()),
+            int(im.min()), int(im.max()))
+
 
     proprio_projector = get_proprio_projector(
         cfg, llm_dim=vla.llm_dim, proprio_dim=proprio_dim
@@ -657,6 +689,11 @@ def main():
         )
 
         test_actions = np.asarray(test_actions, dtype=np.float32)
+
+        # If the model outputs normalized actions (≈[-1,1]), denormalize back to dataset units
+        if denormalize_actions_np is not None:
+            if np.nanmax(np.abs(test_actions)) <= 1.5:
+                test_actions = denormalize_actions_np(test_actions)
         print(f"✅ Generated {len(test_actions)} actions")
         print(f"   Shape: {test_actions.shape}")
         print(f"   First action: {test_actions[0]}")
@@ -690,12 +727,19 @@ def main():
     # Use initial chunk from test_actions
     current_chunk = test_actions
     chunk_idx = 0
+    prev_full = None
 
     for step in range(args.steps):
+        
         # Get new chunk if needed
         if chunk_idx >= len(current_chunk):
             print(f"\n🔄 Replanning at step {step}...")
             obs, _ = make_observation(sim, instr, gripper_range=gr_range)
+
+            if prev_full is not None:
+                print("Δfull_image mean abs:", float(np.mean(np.abs(obs["full_image"].astype(np.int16) - prev_full.astype(np.int16)))))
+            prev_full = obs["full_image"]
+                
             try:
                 current_chunk = get_vla_action(
                     cfg,
@@ -707,8 +751,14 @@ def main():
                     proprio_projector,
                 )
                 current_chunk = np.asarray(current_chunk, dtype=np.float32)
+
+                # If the model outputs normalized actions (≈[-1,1]), denormalize back to dataset units
+                if denormalize_actions_np is not None:
+                    if np.nanmax(np.abs(current_chunk)) <= 1.5:
+                        current_chunk = denormalize_actions_np(current_chunk)
                 chunk_idx = 0
                 print(f"   Generated {len(current_chunk)} new actions")
+                print(f"   ACTIONS: {current_chunk}")
             except Exception as e:
                 print(f"❌ Error replanning: {e}")
                 # Use small safe actions
@@ -739,12 +789,29 @@ def main():
 
         # Apply to simulation
         sim.set_target_position(target_xyz)
+        if hasattr(sim, "set_yaw"): sim.set_yaw(target_yaw)
+        if hasattr(sim, "set_gripper"): sim.set_gripper(target_grip_phys)
+
+        for _ in range(HOLD):
+            sim.run_simulation_step(capture_frame=False)
+
         if hasattr(sim, "set_yaw"):
             sim.set_yaw(target_yaw)
         if hasattr(sim, "set_gripper"):
             sim.set_gripper(target_grip_phys)
 
         sim.run_simulation_step(capture_frame=True)
+        
+        # after sim.run_simulation_step(...)
+        current_xyz = sim.get_end_effector_position()[:3].copy()
+        current_yaw = sim.get_yaw() if hasattr(sim, "get_yaw") else current_yaw
+
+        # if you don’t have a real getter, at least track the commanded ctrl consistently
+        if hasattr(sim, "get_gripper_opening"):
+            current_grip_phys = sim.get_gripper_opening()
+        else:
+            current_grip_phys = float(sim.data.ctrl[sim.act_gripper])  # see §3
+
 
         if step % 10 == 0 or step < 5:
             ee_pos = sim.get_end_effector_position()[:3]
