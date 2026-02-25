@@ -31,6 +31,7 @@ FEATURES = {
     "observation/primary": tf.io.FixedLenFeature([], tf.string),
     "observation/wrist": tf.io.FixedLenFeature([], tf.string),
     "observation/state": tf.io.VarLenFeature(tf.float32),
+    "observation/timestamp": tf.io.FixedLenFeature([], tf.float32, default_value=-1.0),
     "observation/task_description": tf.io.FixedLenFeature([], tf.string),
     "action": tf.io.VarLenFeature(tf.float32),
     "is_terminal": tf.io.VarLenFeature(tf.int64),
@@ -47,6 +48,7 @@ def _parse_example(serialized):
         "primary_jpeg": ex["observation/primary"],
         "wrist_jpeg": ex["observation/wrist"],
         "state": state,
+        "timestamp": ex["observation/timestamp"],
         "action": action,
         "task": ex["observation/task_description"],
     }
@@ -71,11 +73,13 @@ def _annotate_bgr(frame_bgr, lines):
 def _wrap_to_pi(x):
     return (x + np.pi) % (2 * np.pi) - np.pi
 
-
+"""
+python replay_cdpr_tfrecord_checked.py --xml "/root/repo/VLA_CDPR/cdpr_mujoco/wrappers/desk_ketchup_wrapper.xml" --tfrecord ""
+"""
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--xml", required=True, help="MJCF xml for the CDPR sim (same used in collection).")
-    ap.add_argument("--tfrecord", required=True, help="Episode TFRecord path.")
+    ap.add_argument("--xml", default="/root/repo/VLA_CDPR/cdpr_mujoco/wrappers/desk_ketchup_wrapper.xml", help="MJCF xml for the CDPR sim (same used in collection).")
+    ap.add_argument("--tfrecord", default="/root/repo/cdpr_synth_10hz/libero_spatial_no_noops/tfrecords_human_control_fixed/libero_spatial_no_noops-train-HUMAN_CONTROL_desk__ketchup-plate_wrapper__localpatched_teleop_2025-12-14_18-00-08.tfrecord", help="Episode TFRecord path.")
     ap.add_argument("--out", default="replay_from_tfrecord", help="Output directory.")
     ap.add_argument("--mode", choices=["state", "action"], default="state",
                     help="Replay using absolute state or integrated action deltas.")
@@ -103,26 +107,31 @@ def main():
     wrist_jpegs = []
     states = []
     actions = []
+    timestamps = []
     task = None
 
     for item in parsed:
         primary_jpegs.append(bytes(item["primary_jpeg"].numpy()))
         wrist_jpegs.append(bytes(item["wrist_jpeg"].numpy()))
         st = item["state"].numpy().astype(np.float64)
+        ts = float(item["timestamp"].numpy())
         ac = item["action"].numpy().astype(np.float64)
         states.append(st)
+        timestamps.append(ts)
         actions.append(ac)
         if task is None:
             task = item["task"].numpy().decode("utf-8")
 
     states = np.asarray(states, dtype=np.float64)
     actions = np.asarray(actions, dtype=np.float64)
+    timestamps = np.asarray(timestamps, dtype=np.float64)
     T = len(states)
 
     if args.max_steps is not None:
         T = min(T, int(args.max_steps))
         states = states[:T]
         actions = actions[:T]
+        timestamps = timestamps[:T]
         primary_jpegs = primary_jpegs[:T]
         wrist_jpegs = wrist_jpegs[:T]
 
@@ -132,9 +141,30 @@ def main():
         raise SystemExit(f"Expected action shape (T,5+). Got {actions.shape}")
 
     print(f"Loaded TFRecord: steps={T}, task='{task}'")
+    if timestamps.size >= 2 and np.all(timestamps >= 0.0):
+        print(f"Timestamps: duration={timestamps[-1]-timestamps[0]:.3f}s")
     print(f"State gripper min/max: {states[:,4].min():.4f} / {states[:,4].max():.4f}  "
           f"(changes={(np.abs(np.diff(states[:,4]))>1e-6).sum()})")
     print(f"Action gripper delta min/max: {actions[:,4].min():.4f} / {actions[:,4].max():.4f}")
+
+    # ---- Derive dataset/control rate from exported timestamps (if present) ----
+    # If export_to_rlds_fixed2.py was used, each step includes observation/timestamp in seconds since episode start.
+    # This lets us compute a true replay/video FPS and avoids "video is half length" when the assumed Hz is wrong.
+    import sys
+    effective_replay_fps = float(args.replay_fps)
+    if timestamps.size >= 2 and np.all(timestamps >= 0.0):
+        dt = float(np.median(np.diff(timestamps)))
+        if dt > 1e-9:
+            auto_fps = 1.0 / dt
+            # Only override if the user did NOT explicitly pass --replay-fps
+            if "--replay-fps" not in sys.argv:
+                effective_replay_fps = auto_fps
+            print(f"Timestamp-based fps: median_dt={dt:.4f}s -> auto_fps={auto_fps:.3f}Hz "
+                  f"(using {effective_replay_fps:.3f}Hz for replay/dataset-video)")
+        else:
+            print("[warn] timestamps are degenerate; falling back to --replay-fps")
+    else:
+        print("[info] no timestamps in TFRecord (or defaulted); using --replay-fps")
 
     # ---- Sanity checks for correspondence ----
     # In a typical RLDS layout, action[t] should move observation/state[t] -> observation/state[t+1].
@@ -171,13 +201,13 @@ def main():
             vw.release()
 
         ov_bgr = [_decode_jpeg_to_bgr(b) for b in primary_jpegs]
-        write_video(ov_bgr, out_dir / "dataset_overview.mp4", args.replay_fps)
-        print(f"✅ wrote dataset_overview.mp4 ({args.replay_fps} fps)")
+        write_video(ov_bgr, out_dir / "dataset_overview.mp4", effective_replay_fps)
+        print(f"✅ wrote dataset_overview.mp4 ({effective_replay_fps:.3f} fps)")
 
         if args.wrist:
             wr_bgr = [_decode_jpeg_to_bgr(b) for b in wrist_jpegs]
-            write_video(wr_bgr, out_dir / "dataset_wrist.mp4", args.replay_fps)
-            print(f"✅ wrote dataset_wrist.mp4 ({args.replay_fps} fps)")
+            write_video(wr_bgr, out_dir / "dataset_wrist.mp4", effective_replay_fps)
+            print(f"✅ wrote dataset_wrist.mp4 ({effective_replay_fps:.3f} fps)")
 
     # ---- Build absolute command trajectory depending on mode ----
     if args.mode == "state":
@@ -195,14 +225,14 @@ def main():
     sim.initialize()
 
     sim_dt = float(sim.controller.dt)
-    hold = int(round((1.0 / float(args.replay_fps)) / sim_dt))
+    hold = int(round((1.0 / float(effective_replay_fps)) / sim_dt))
     hold = max(1, hold)
 
     capture_stride = int(round((1.0 / float(args.video_fps)) / sim_dt)) if args.record_video else None
     if capture_stride is not None:
         capture_stride = max(1, capture_stride)
 
-    print(f"sim_dt={sim_dt:.6f}, replay_fps={args.replay_fps} -> hold_steps={hold}")
+    print(f"sim_dt={sim_dt:.6f}, replay_fps={effective_replay_fps:.3f} -> hold_steps={hold}")
     if args.record_video:
         print(f"output video_fps={args.video_fps} -> capture_stride={capture_stride}")
 

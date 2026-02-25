@@ -324,7 +324,7 @@ def main():
         use_diffusion=False,
         use_film=False,
         num_images_in_input=2,
-        use_proprio=True,
+        use_proprio=False,
         load_in_8bit=False,
         load_in_4bit=False,
         center_crop=args.center_crop,
