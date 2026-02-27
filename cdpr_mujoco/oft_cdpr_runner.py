@@ -140,7 +140,7 @@ def map_action_to_cdpr(
     current_xyz,
     current_yaw,
     current_grip_phys,
-    max_xyz_step=0.05,
+    max_xyz_step=0.5,
     max_yaw_step=np.pi * 0.1,
     max_grip_step=0.02,
 ):
@@ -205,11 +205,11 @@ def main():
     )
     ap.add_argument(
         "--adapter-path",
-        default="/root/repo/VLA_CDPR/oft_cdpr_ckpts/cdpr_finetune_20260224-151035_sbs6400/vla_cdpr_adapter",
+        default="/root/repo/VLA_CDPR/oft_cdpr_ckpts/cdpr_finetune_step10000_20260227-032335_sbs50000/vla_cdpr_adapter",
     )
     ap.add_argument(
         "--action-head-path",
-        default="/root/repo/VLA_CDPR/oft_cdpr_ckpts/cdpr_finetune_20260224-151035_sbs6400/action_head_cdpr.pt",
+        default="/root/repo/VLA_CDPR/oft_cdpr_ckpts/cdpr_finetune_step10000_20260227-032335_sbs50000/action_head_cdpr.pt",
     )
 
     # We will auto-fill instr from dataset task if not provided.
@@ -229,7 +229,7 @@ def main():
     # CDPR workspace bounds
     ap.add_argument("--x-bound", default="-0.8,0.8")
     ap.add_argument("--y-bound", default="-0.8,0.8")
-    ap.add_argument("--z-bound", default="0.10,1.20")
+    ap.add_argument("--z-bound", default="0.0,1.20")
     ap.add_argument("--grip-range", default="0.0,0.03")
     ap.add_argument("--no-adapter", action="store_true")
 
@@ -335,9 +335,9 @@ def main():
             dataset_object_name = object_names[0] if object_names else "target_object"
 
         scene_z = defaults.get("scene_z", -0.85)
-        ee_start = defaults.get("ee_start", (0.0, 0.0, 0.45))
+        ee_start = defaults.get("ee_start", (0.0, 0.0, 0.55))
         table_z = defaults.get("table_z", 0.15)
-        settle_t = defaults.get("settle_time", 1.0)
+        settle_t = defaults.get("settle_time", 0.2)
 
         print(
             f"\n🏗  Building (or reusing) dataset-style wrapper for scene='{scene_name}', "
@@ -391,7 +391,7 @@ def main():
 
     SIM_DT = sim.controller.dt          # 1/60
     DATA_DT = 1.0 / 10.0                # your demo rate
-    HOLD = 60 # 6
+    HOLD = 6 # 6
 
     # Optional: apply central placement like in generate_cdpr_dataset.run_episode()
     if args.xml is None and place_objects_non_overlapping is not None:
@@ -527,17 +527,21 @@ def main():
             _scale  = 0.5 * (_q99 - _q01)
             _scale  = np.clip(_scale, 1e-6, None)
 
-            def denormalize_actions_np(a_n: np.ndarray) -> np.ndarray:
-                """Denormalize actions from [-1,1] back to dataset action units."""
-                a_n = np.asarray(a_n, dtype=np.float32)
-                return a_n * _scale + _center
+            scale = np.array([0.0025, 0.0025, 0.0025, 1.0, 1.0])
+            # scale = scale * 2.0
+
+            def normalize_actions(a):      # a: (...,5)
+                return torch.clamp(a / scale, -1.0, 1.0)
+
+            def denormalize_actions(a_n):  # a_n: (...,5)
+                return a_n #* scale
 
             # Attach for debugging / reuse
-            vla._cdpr_denormalize_actions_np = denormalize_actions_np
+            vla._cdpr_denormalize_actions_np = denormalize_actions
             print(f"✅ Prepared CDPR action denormalizer (center/scale from q01/q99). center={_center}, scale={_scale}")
         except Exception as e:
             print(f"⚠️ Could not build action denormalizer from stats: {e}")
-            denormalize_actions_np = None
+            denormalize_actions = None
 
     else:
         print("⚠️ Dataset statistics not found")
@@ -691,9 +695,9 @@ def main():
         test_actions = np.asarray(test_actions, dtype=np.float32)
 
         # If the model outputs normalized actions (≈[-1,1]), denormalize back to dataset units
-        if denormalize_actions_np is not None:
+        if denormalize_actions is not None:
             if np.nanmax(np.abs(test_actions)) <= 1.5:
-                test_actions = denormalize_actions_np(test_actions)
+                test_actions = denormalize_actions(test_actions)
         print(f"✅ Generated {len(test_actions)} actions")
         print(f"   Shape: {test_actions.shape}")
         print(f"   First action: {test_actions[0]}")
@@ -736,10 +740,6 @@ def main():
             print(f"\n🔄 Replanning at step {step}...")
             obs, _ = make_observation(sim, instr, gripper_range=gr_range)
 
-            if prev_full is not None:
-                print("Δfull_image mean abs:", float(np.mean(np.abs(obs["full_image"].astype(np.int16) - prev_full.astype(np.int16)))))
-            prev_full = obs["full_image"]
-                
             try:
                 current_chunk = get_vla_action(
                     cfg,
@@ -752,13 +752,18 @@ def main():
                 )
                 current_chunk = np.asarray(current_chunk, dtype=np.float32)
 
+                np.set_printoptions(precision=8, suppress=False)
                 # If the model outputs normalized actions (≈[-1,1]), denormalize back to dataset units
-                if denormalize_actions_np is not None:
+                print(f"ACTION BEFORE NORMALIZATION: {current_chunk[0]}")
+
+                if denormalize_actions is not None:
                     if np.nanmax(np.abs(current_chunk)) <= 1.5:
-                        current_chunk = denormalize_actions_np(current_chunk)
+                        current_chunk = denormalize_actions(current_chunk)
                 chunk_idx = 0
+
+                print(f"ACTION AFTER NORMALIZATION: {current_chunk[0]}")
                 print(f"   Generated {len(current_chunk)} new actions")
-                print(f"   ACTIONS: {current_chunk}")
+                # print(f"   ACTIONS: {current_chunk}")
             except Exception as e:
                 print(f"❌ Error replanning: {e}")
                 # Use small safe actions
