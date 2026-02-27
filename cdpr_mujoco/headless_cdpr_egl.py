@@ -62,7 +62,7 @@ class HeadlessCDPRController:
         target_lengths = self.inverse_kinematics(target_pos)
 
         # If target is basically current → hold steady
-        if np.linalg.norm(target_pos - current_ee_pos) < 1e-4 and current_slider_qpos is not None:
+        if np.linalg.norm(target_pos - current_ee_pos) < 1e-6 and current_slider_qpos is not None:
             return np.array(current_slider_qpos)
 
         # otherwise use your length → slider mapping
@@ -204,7 +204,7 @@ class HeadlessCDPRSimulation:
         self.target_pos = self.get_end_effector_position().copy()
         self.controller.prev_lengths = self.controller.inverse_kinematics(self.target_pos)
 
-        self._match_sliders_to_ee_lengths(max_iter=12, tol=1e-4)
+        self._match_sliders_to_ee_lengths(max_iter=12, tol=1e-6)
         print("Headless CDPR Simulation initialized successfully!")
         print(f"Using {'EGL' if EGL_AVAILABLE else 'software'} rendering")
 
@@ -304,7 +304,7 @@ class HeadlessCDPRSimulation:
             # only safe if the actuator is mjtGain::position (yours are <position .../>)
             self.data.ctrl[i] = float(self.data.qpos[qadr])
 
-    def _match_sliders_to_ee_lengths(self, max_iter=12, tol=1e-4):
+    def _match_sliders_to_ee_lengths(self, max_iter=12, tol=6):
         """
         Adjust the four slider joint positions so that the actual tendon lengths
         match the geometric target lengths implied by the current EE position.
