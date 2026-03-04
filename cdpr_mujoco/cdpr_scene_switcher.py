@@ -22,10 +22,10 @@ import os, sys, argparse, tempfile, shutil, textwrap
 from pathlib import Path
 import xml.etree.ElementTree as ET
 import numpy as np
+from typing import Optional
 
-# --- repo-local import of simulation class ---
-sys.path.append(str(Path(__file__).parent))  # add VLA_CDPR/mujoco to path
-from headless_cdpr_egl import HeadlessCDPRSimulation
+# --- repo-local module path (needed only for optional smoke demo import) ---
+sys.path.append(str(Path(__file__).parent))
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent  # repo/
@@ -42,8 +42,24 @@ OBJECTS_DIR_EXTRA = LIBERO_ASSETS / "stable_scanned_objects"   # bowls, plates, 
 OBJECTS_DIRS = [OBJECTS_DIR_MAIN, OBJECTS_DIR_EXTRA]
 
 # --- EXTRA ASSETS (YCB) ---
-# Prefer env var, otherwise look for VLA_CDPR/external_assets/ycb_dataset/ycb
-YCB_ROOT = Path(os.environ.get("YCB_ASSETS", REPO / "CDPR-Dataset" / "cdpr_dataset" / "external_assets" / "ycb_dataset" / "ycb")).resolve()
+# Prefer env var, otherwise probe common layouts used across local and remote repos.
+def _resolve_ycb_root() -> Path:
+    env_root = os.environ.get("YCB_ASSETS")
+    if env_root:
+        return Path(env_root).expanduser().resolve()
+
+    candidates = [
+        REPO / "CDPR-Dataset" / "cdpr_dataset" / "external_assets" / "ycb_dataset" / "ycb",
+        REPO / "CDPR-Dataset" / "external_assets" / "ycb_dataset" / "ycb",
+        REPO / "external_assets" / "ycb_dataset" / "ycb",
+    ]
+    for cand in candidates:
+        p = cand.resolve()
+        if p.exists():
+            return p
+    return candidates[0].resolve()
+
+YCB_ROOT = _resolve_ycb_root()
 
 CDPR_XML = HERE / "cdpr.xml"
 
@@ -180,7 +196,7 @@ def make_placed_object_xml(orig_object_xml: Path,
                            pos,
                            quat,
                            force_dynamic: bool = False,
-                           logical_name: str | None = None):
+                           logical_name: Optional[str] = None):
     import xml.etree.ElementTree as ET
 
     def clone(elem):
@@ -385,11 +401,32 @@ def build_wrapper_mjcf(scene_xml: Path, cdpr_xml: Path, placed_object_xmls: list
     
 
 def main():
-    ap = argparse.ArgumentParser(description="Run CDPR in a LIBERO scene with placed objects.")
+    ap = argparse.ArgumentParser(description="Build CDPR+LIBERO wrapper MJCF and optionally run a smoke demo.")
     ap.add_argument("--scene", required=True, help="Scene name under assets/scenes (e.g., 'desk').")
     ap.add_argument("--object", action="append", default=[],
                     help="Object placement: name:x,y,z[:qx,qy,qz,qw]. Repeat for multiple.")
-    ap.add_argument("--outdir", default=str(HERE / "trajectory_results"), help="Output video/data dir.")
+    ap.add_argument(
+        "--outdir",
+        default=str(HERE / "trajectory_results"),
+        help="Output directory for smoke demo videos/data (used only with --run_demo).",
+    )
+    ap.add_argument(
+        "--run_demo",
+        action="store_true",
+        help="After building wrapper, run a short smoke demo and save trajectory results.",
+    )
+    ap.add_argument(
+        "--demo_name",
+        type=str,
+        default="scene_switcher",
+        help="Subdirectory name under --outdir for smoke demo outputs.",
+    )
+    ap.add_argument(
+        "--instruction",
+        type=str,
+        default="",
+        help="Optional instruction string saved into summary/npz and instruction.txt for demo runs.",
+    )
     ap.add_argument("--hover", default="0.5,0.5,0.35", help="Hover xyz over object for the demo (x,y,z).")
     ap.add_argument("--graspz", type=float, default=0.06, help="Grasp height z.")
     ap.add_argument("--liftz",  type=float, default=0.35, help="Lift height z.")
@@ -415,54 +452,51 @@ def main():
                 help="Only build wrapper MJCF and exit (no demo, no videos).")
     
     args = ap.parse_args()
-    
-    # temp workspace
-    tmpdir = Path(tempfile.mkdtemp(prefix="cdpr_scene_", dir=str(HERE)))
 
-    # Where to write the final wrapper
-    if args.wrapper_out:
-        wrapper_xml = Path(args.wrapper_out).resolve()
-        wrapper_xml.parent.mkdir(parents=True, exist_ok=True)
-        gen_base = wrapper_xml.parent     # <- persist placed_* and overrides here
-    else:
-        wrapper_xml = tmpdir / "cdpr_scene_wrapper.xml"
-        gen_base = tmpdir                 # <- ephemeral if no --wrapper_out
+    # `--build_only` remains for backward compatibility; default behavior is build-only unless --run_demo.
+    run_demo = bool(args.run_demo and not args.build_only)
+    if args.build_only and args.run_demo:
+        print("ℹ️ Both --build_only and --run_demo were provided; skipping demo due to --build_only.")
 
-
-    scene_xml = find_scene_xml(args.scene)
-    if not CDPR_XML.exists():
-        raise FileNotFoundError(f"CDPR XML not found at {CDPR_XML}")
-
-    # Scene (z-shift if needed)
-    if abs(args.scene_z) > 1e-6:
-        scene_for_include = gen_base / f"{args.scene}_zshift.xml"
-        preprocess_scene_with_zoffset(scene_xml, args.scene_z, scene_for_include)
-    else:
-        scene_for_include = scene_xml
-
-    # CDPR (override ee_base pos if requested)
-    if args.ee_start is not None:
-        ee_xyz = np.fromstring(args.ee_start, sep=",", dtype=float)
-        if ee_xyz.size != 3:
-            raise ValueError("--ee_start must be 'x,y,z'")
-        cdpr_for_include = gen_base / "cdpr_ee_override.xml"
-        preprocess_cdpr_set_ee_start(CDPR_XML, ee_xyz, cdpr_for_include)
-    else:
-        cdpr_for_include = CDPR_XML
-
-
-    # Parse objects
-    placements = []
-    for ob in args.object:
-        name, pos, quat = parse_object_arg(ob)
-        if args.object_on_table:
-            pos[2] = float(args.table_z)  # snap to table height
-        obj_xml = find_object_xml(name)
-        placements.append((name, obj_xml, pos, quat))
-
-    # temp workspace for generated files
-    tmpdir = Path(tempfile.mkdtemp(prefix="cdpr_scene_", dir=str(HERE)))
+    work_tmpdir = Path(tempfile.mkdtemp(prefix="cdpr_scene_", dir=str(HERE)))
+    sim = None
     try:
+        # Where to write generated wrapper and helper XML files.
+        if args.wrapper_out:
+            wrapper_xml = Path(args.wrapper_out).expanduser().resolve()
+            wrapper_xml.parent.mkdir(parents=True, exist_ok=True)
+            gen_base = wrapper_xml.parent
+        else:
+            wrapper_xml = work_tmpdir / "cdpr_scene_wrapper.xml"
+            gen_base = work_tmpdir
+
+        scene_xml = find_scene_xml(args.scene)
+        if not CDPR_XML.exists():
+            raise FileNotFoundError(f"CDPR XML not found at {CDPR_XML}")
+
+        if abs(args.scene_z) > 1e-6:
+            scene_for_include = gen_base / f"{args.scene}_zshift.xml"
+            preprocess_scene_with_zoffset(scene_xml, args.scene_z, scene_for_include)
+        else:
+            scene_for_include = scene_xml
+
+        if args.ee_start is not None:
+            ee_xyz = np.fromstring(args.ee_start, sep=",", dtype=float)
+            if ee_xyz.size != 3:
+                raise ValueError("--ee_start must be 'x,y,z'")
+            cdpr_for_include = gen_base / "cdpr_ee_override.xml"
+            preprocess_cdpr_set_ee_start(CDPR_XML, ee_xyz, cdpr_for_include)
+        else:
+            cdpr_for_include = CDPR_XML
+
+        placements = []
+        for ob in args.object:
+            name, pos, quat = parse_object_arg(ob)
+            if args.object_on_table:
+                pos[2] = float(args.table_z)
+            obj_xml = find_object_xml(name)
+            placements.append((name, obj_xml, pos, quat))
+
         placed_xmls = []
         for idx, (name, obj_xml, pos, quat) in enumerate(placements):
             placed_path = gen_base / f"placed_{idx}_{name}.xml"
@@ -473,79 +507,74 @@ def main():
                 pos=pos,
                 quat=quat,
                 force_dynamic=args.object_dynamic,
-                logical_name=name,        # NEW: ensures body name reflects object_name
+                logical_name=name,
             )
             placed_xmls.append(placed_path)
 
-        wrapper_xml = (Path(args.wrapper_out).resolve()
-               if args.wrapper_out else (tmpdir / "cdpr_scene_wrapper.xml"))
         build_wrapper_mjcf(scene_for_include, cdpr_for_include, placed_xmls, wrapper_xml)
-
         print(f"✅ Built wrapper: {wrapper_xml}")
         print(f"   Includes {len(placed_xmls)} object(s).")
-        
-        if args.build_only:
-            # Do not run a demo, do not initialize the simulator here.
-            print(f"✅ Wrapper built (build_only). Path: {wrapper_xml}")
+
+        if not run_demo:
+            print("✅ Wrapper build completed (demo disabled).")
             return
 
-        # Only delete tmpdir if we used it for everything
-        if not args.wrapper_out:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-        # Run your existing headless sim on the wrapper
+        from headless_cdpr_egl import HeadlessCDPRSimulation
         sim = HeadlessCDPRSimulation(str(wrapper_xml), output_dir=args.outdir)
         sim.initialize()
-        
-        # settle objects so they drop onto the table
+
         if args.settle_time > 0:
             steps = max(1, int(round(args.settle_time / sim.controller.dt)))
             print(f"⏳ settling objects for {args.settle_time:.2f}s ({steps} steps)")
-            for k in range(steps):
-                # keep cables neutral (we're not commanding sliders here)
+            for _ in range(steps):
                 sim.run_simulation_step(capture_frame=False)
 
-        # A tiny smoke test: move to hover over the first object (if provided), do a quick yaw & squeeze
         if placements:
             ox, oy, _ = placements[0][2]
         else:
-            # default hover parsed from CLI
-            ox, oy, hz = np.fromstring(args.hover, sep=",", dtype=float)
+            ox, oy = 0.0, 0.0
         hover = np.fromstring(args.hover, sep=",", dtype=float)
         if hover.size != 3:
             hover = np.array([ox, oy, 0.35], dtype=float)
 
-        # Use your demo (if you added yaw helpers), fallback to simple hover motion
         try:
-            ok, _ = sim.goto(hover, max_steps=args.steps)
+            sim.goto(hover, max_steps=args.steps)
             sim.set_yaw(args.yaw)
             sim.open_gripper()
-            for _ in range(40): sim.run_simulation_step(capture_frame=True)
+            for _ in range(40):
+                sim.run_simulation_step(capture_frame=True)
             sim.close_gripper()
-            for _ in range(40): sim.run_simulation_step(capture_frame=True)
+            for _ in range(40):
+                sim.run_simulation_step(capture_frame=True)
         except Exception as e:
             print("Warning during smoke motion:", e)
 
-        # Save a short clip and data
-        # ts = "scene_switcher"
-        # sim.save_trajectory_results(HERE / "trajectory_results" / ts, ts)
-        
-        ts = "scene_switcher"
-        ts_dir = Path(HERE / "trajectory_results" / ts)
-        ts_dir.mkdir(parents=True, exist_ok=True)
-        sim.save_trajectory_results(str(ts_dir), ts)
-        sim.cleanup()
-        print(f"✅ Loaded scene '{args.scene}' with {len(placements)} object(s). Wrapper at: {wrapper_xml}")
-        if args.wrapper_out or args.keep:
-            pass  # keep files
-        else:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+        instruction = str(args.instruction).strip()
+        if instruction:
+            setattr(sim, "language_instruction", instruction)
 
+        demo_root = Path(args.outdir).expanduser().resolve()
+        demo_dir = demo_root / args.demo_name
+        demo_dir.mkdir(parents=True, exist_ok=True)
+        sim.save_trajectory_results(str(demo_dir), args.demo_name)
+        if instruction:
+            (demo_dir / "instruction.txt").write_text(instruction + "\n", encoding="utf-8")
 
+        print(
+            f"✅ Loaded scene '{args.scene}' with {len(placements)} object(s). "
+            f"Wrapper at: {wrapper_xml}"
+        )
     finally:
-        # Keep the temp folder for debugging by commenting this next line
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        if sim is not None:
+            try:
+                sim.cleanup()
+            except Exception:
+                pass
+
+        if args.keep:
+            print(f"🧪 Keeping temporary workspace: {work_tmpdir}")
+        else:
+            shutil.rmtree(work_tmpdir, ignore_errors=True)
 
 if __name__ == "__main__":
     main()

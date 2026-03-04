@@ -398,7 +398,7 @@ class HeadlessCDPRSimulation:
 
     # === Gripper / yaw helpers ===
     def get_gripper_opening(self):
-        # best-effort: commanded opening (ctrl) is at least consistent
+        # Best-effort getter based on commanded actuator target.
         return float(self.data.ctrl[self.act_gripper])
 
     def set_gripper(self, opening_m):
