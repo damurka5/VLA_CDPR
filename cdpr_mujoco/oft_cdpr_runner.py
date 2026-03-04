@@ -205,11 +205,11 @@ def main():
     )
     ap.add_argument(
         "--adapter-path",
-        default="/root/repo/VLA_CDPR/oft_cdpr_ckpts/cdpr_finetune_step10000_20260227-032335_sbs50000/vla_cdpr_adapter",
+        default="/root/repo/VLA_CDPR/oft_cdpr_ckpts/cdpr_finetune_step20000_20260302-092247_sbs100000/vla_cdpr_adapter",
     )
     ap.add_argument(
         "--action-head-path",
-        default="/root/repo/VLA_CDPR/oft_cdpr_ckpts/cdpr_finetune_step10000_20260227-032335_sbs50000/action_head_cdpr.pt",
+        default="/root/repo/VLA_CDPR/oft_cdpr_ckpts/cdpr_finetune_step20000_20260302-092247_sbs100000/action_head_cdpr.pt",
     )
 
     # We will auto-fill instr from dataset task if not provided.

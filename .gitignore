@@ -1,2 +1,12 @@
 .DS_Store
 /oft_cdpr_ckpts/
+/cdpr_mujoco/oft_cdpr_runs/
+/cdpr_mujoco/probes_cdpr/
+/cdpr_mujoco/probes_cdpr_v2/
+/cdpr_mujoco/probes_cdpr_v3/
+/cdpr_mujoco/probes_cdpr_v4/
+/cdpr_mujoco/probes_cdpr_v5/
+/cdpr_mujoco/probes_cdpr_v6/
+/cdpr_mujoco/probes_cdpr_v7/
+/cdpr_mujoco/replay_from_tfrecord/
+*.pyc
