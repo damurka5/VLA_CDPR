@@ -2,7 +2,7 @@
   <compiler autolimits="true"/>
   <default>
     <site type="sphere" rgba="1 0 0 1" size="0.005"/>
-    <tendon rgba="0.2 0.2 0.2 1"/>
+    <tendon rgba="0.4 0.4 0.4 0.35" width="0.001"/>
   </default>
   <visual>
     <headlight diffuse=".7 .7 .7"/>
