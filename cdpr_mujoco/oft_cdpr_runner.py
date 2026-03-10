@@ -229,7 +229,7 @@ def main():
     # CDPR workspace bounds
     ap.add_argument("--x-bound", default="-0.8,0.8")
     ap.add_argument("--y-bound", default="-0.8,0.8")
-    ap.add_argument("--z-bound", default="0.0,1.20")
+    ap.add_argument("--z-bound", default="0.08,1.20")
     ap.add_argument("--grip-range", default="0.0,0.03")
     ap.add_argument("--no-adapter", action="store_true")
 
