@@ -90,9 +90,6 @@ class HeadlessCDPRSimulation:
 
         self.controller = HeadlessCDPRController(self.frame_points)
         self.target_pos = np.array([0, 0, 1.309], dtype=float)
-        self.gripper_min = 0.0
-        self.gripper_max = 0.03
-        self.jnt_finger_l_qadr = None
 
         # Recording
         self.overview_frames = []
@@ -128,21 +125,6 @@ class HeadlessCDPRSimulation:
         # Tool actuators
         self.act_yaw     = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "act_ee_yaw")
         self.act_gripper = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "act_gripper")
-        self.jnt_finger_l = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_JOINT, "finger_l")
-        if self.jnt_finger_l != -1:
-            self.jnt_finger_l_qadr = int(self.model.jnt_qposadr[self.jnt_finger_l])
-
-        # Read gripper limits from the active model so wrappers and base XML stay consistent.
-        if self.act_gripper != -1 and bool(self.model.actuator_ctrllimited[self.act_gripper]):
-            g_lo, g_hi = self.model.actuator_ctrlrange[self.act_gripper]
-        elif self.jnt_finger_l != -1 and bool(self.model.jnt_limited[self.jnt_finger_l]):
-            g_lo, g_hi = self.model.jnt_range[self.jnt_finger_l]
-        else:
-            g_lo, g_hi = 0.0, 0.03
-        self.gripper_min = float(min(g_lo, g_hi))
-        self.gripper_max = float(max(g_lo, g_hi))
-        if self.gripper_max <= self.gripper_min:
-            self.gripper_min, self.gripper_max = 0.0, 0.03
 
         # Target object (body + geom). If the geom is unnamed, we’ll find it by body.
         # self.body_target = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_BODY, "target_object")
@@ -416,23 +398,19 @@ class HeadlessCDPRSimulation:
 
     # === Gripper / yaw helpers ===
     def get_gripper_opening(self):
-        if self.jnt_finger_l_qadr is not None:
-            return float(self.data.qpos[self.jnt_finger_l_qadr])
-        # Fallback if finger joint is absent.
+        # Best-effort getter based on commanded actuator target.
         return float(self.data.ctrl[self.act_gripper])
 
     def set_gripper(self, opening_m):
-        """Set desired opening for left finger (right follows)."""
-        if self.act_gripper == -1:
-            return
-        opening = float(np.clip(opening_m, self.gripper_min, self.gripper_max))
+        """Set desired opening for left finger (right follows). Range [0, 0.03]."""
+        opening = float(np.clip(opening_m, 0.0, 0.03))
         self.data.ctrl[self.act_gripper] = opening
 
     def open_gripper(self):
-        self.set_gripper(self.gripper_max)
+        self.set_gripper(0.03)
 
     def close_gripper(self):
-        self.set_gripper(self.gripper_min)
+        self.set_gripper(0.0)
 
     def get_yaw(self):
         return float(self.data.qpos[self.jnt_yaw_qadr])

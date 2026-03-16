@@ -31,16 +31,10 @@ class CDPRLiberoEnv:
         mj.mjv_defaultOption(self.opt)
         
         self.yaw_joint_range = np.array([-np.pi, np.pi], dtype=float)
+        self.gripper_range   = np.array([0.0, 0.03], dtype=float)
         # find actuator indices once (optional)
         self.act_id_yaw = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "act_ee_yaw")
         self.act_id_gr  = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, "act_gripper")
-        if self.act_id_gr == -1:
-            self.gripper_range = np.array([0.0, 0.03], dtype=float)
-        elif bool(self.model.actuator_ctrllimited[self.act_id_gr]):
-            self.gripper_range = self.model.actuator_ctrlrange[self.act_id_gr].astype(float).copy()
-        else:
-            self.gripper_range = np.array([0.0, 0.03], dtype=float)
-        self.gripper_range.sort()
 
 
         self.viewport = mj.MjrRect(0, 0, self.img_w, self.img_h)
@@ -152,7 +146,7 @@ class CDPRLiberoEnv:
         # --- yaw ---
         yaw = np.clip(a[3], self.yaw_joint_range[0], self.yaw_joint_range[1])
 
-        # --- gripper (0..1) -> physical opening in actuator range ---
+        # --- gripper (0..1) -> joint length 0..0.03 ---
         g = np.clip(a[4], 0.0, 1.0)
         g_len = self.gripper_range[0] + g * (self.gripper_range[1] - self.gripper_range[0])
 
